@@ -1,2 +1,10 @@
 uvicorn backend.main:app --reload
 streamlit run app.py
+
+# Most recuring gap monthly 
+# Most number of repeated gaps
+# Prompts for assignee comments and system 
+# Cache for MongoDB
+# Missing fields - only present in DB and to show it in the UI
+# For each of the gaps given , assign the SPRLL responsible
+# Mail thing
