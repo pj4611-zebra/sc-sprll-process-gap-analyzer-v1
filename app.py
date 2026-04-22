@@ -22,8 +22,8 @@ DISCIPLINES = [
 ]
 
 PROMPT_OPTIONS = {
-    "Option 1 — Senior Analyst (5 gaps, evidence + fix)": 1,
-    "Option 2 — Expert Analyst (1-8 gaps, flexible depth)": 2,
+    "Option 1 — Senior Analyst": 1,
+    "Option 2 — Expert Analyst": 2,
 }
 
 
