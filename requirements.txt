@@ -79,4 +79,4 @@ python-dotenv
 requests
 streamlit
 truststore
-google-cloud-aiplatform
+google-genai

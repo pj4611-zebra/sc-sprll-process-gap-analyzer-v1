@@ -7,10 +7,10 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import requests as req_lib
-import vertexai  # type: ignore
+from google import genai  # type: ignore
+from google.genai.types import GenerateContentConfig  # type: ignore
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
-from vertexai.generative_models import GenerativeModel  # type: ignore
 
 from .config import get_settings
 
@@ -24,7 +24,6 @@ FIELD_MAPPING = {
     "description": "Description",
     "customfield_12801": "Discipline",
     "status": "Status",
-    #LLTYPE primary and LLTYpe Secondary , Action taken summary 
 }
 
 
@@ -32,21 +31,14 @@ FIELD_MAPPING = {
 # Normalisation helpers
 # =========================
 def _normalize_sprll_number(sprll_number: str) -> str:
-    """
-    Normalize a SPRLL number to the canonical 'SPRLL-XXXX' format.
-    Accepts: '4212', 'SPRLL4212', 'sprll-4212', 'SPRLL-4212'.
-    """
     value = (sprll_number or "").strip().upper()
     if not value:
         return value
-    # Already canonical
     if re.match(r"^SPRLL-\d+$", value):
         return value
-    # Strip any leading 'SPRLL-' or 'SPRLL' prefix, then re-add
     num = re.sub(r"^SPRLL-?", "", value)
     if num.isdigit():
         return f"SPRLL-{num}"
-    # If it doesn't start with SPRLL-, add it
     if not value.startswith("SPRLL-"):
         return f"SPRLL-{value}"
     return value
@@ -68,10 +60,6 @@ def _jira_headers() -> Dict[str, str]:
 # ADF (Atlassian Document Format) → plain text
 # =========================
 def adf_to_text(node: Any) -> str:
-    """
-    Convert Jira ADF (Atlassian Document Format) to plain text.
-    Handles strings, dict nodes, and lists recursively.
-    """
     if node is None:
         return ""
     if isinstance(node, str):
@@ -82,7 +70,6 @@ def adf_to_text(node: Any) -> str:
         node_type = node.get("type")
         text_value = node.get("text", "")
         content = node.get("content", [])
-
         if node_type in {"paragraph", "heading"}:
             return adf_to_text(content) + "\n"
         if node_type == "hardBreak":
@@ -98,7 +85,6 @@ def adf_to_text(node: Any) -> str:
 
 
 def normalize_rich_text(value: Any) -> str:
-    """Convert a potentially ADF/dict/list value to plain text string."""
     if isinstance(value, (dict, list)):
         text = adf_to_text(value).strip()
         return text if text else json.dumps(value)
@@ -127,7 +113,6 @@ def check_missing_fields(issue_key: str, fields: Dict[str, Any]) -> List[str]:
 
 
 def _extract_discipline(fields: Dict[str, Any]) -> str:
-    """Extract discipline from customfield_12801 in various forms."""
     discipline_raw = fields.get("customfield_12801")
     if isinstance(discipline_raw, dict):
         return (
@@ -147,7 +132,6 @@ def _extract_discipline(fields: Dict[str, Any]) -> str:
 
 
 def _extract_assignee_name(fields: Dict[str, Any]) -> str:
-    """Return the assignee's name (username first, fallback displayName)."""
     assignee = fields.get("assignee") or {}
     return assignee.get("name") or assignee.get("displayName") or ""
 
@@ -155,17 +139,12 @@ def _extract_assignee_name(fields: Dict[str, Any]) -> str:
 def _extract_assignee_comments(
     issue_json: Dict[str, Any], assignee_name: str
 ) -> List[str]:
-    """
-    Return plain-text bodies of comments authored by the assignee.
-    Matching is done on author.name first, then author.displayName.
-    """
     comments: List[str] = []
     issue_fields = issue_json.get("fields", {})
     comment_block = issue_fields.get("comment", {})
     comment_items = (
         comment_block.get("comments", []) if isinstance(comment_block, dict) else []
     )
-
     for c in comment_items:
         author = c.get("author") or {}
         author_name = author.get("name") or author.get("displayName") or ""
@@ -174,19 +153,251 @@ def _extract_assignee_comments(
             body_text = normalize_rich_text(body)
             if body_text:
                 comments.append(body_text)
-
     return comments
 
 
 # =========================
-# Vertex AI (Gemini) helpers
+# Vertex AI (Gemini) helpers via google-genai SDK
 # =========================
 @lru_cache
-def _get_vertex_model() -> GenerativeModel:
+def _get_genai_client() -> genai.Client:
     s = get_settings()
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = s.google_application_credentials
-    vertexai.init(project=s.gcp_project, location=s.gcp_location)
-    return GenerativeModel(s.vertex_model)
+    return genai.Client(
+        vertexai=True,
+        project=s.gcp_project,
+        location=s.gcp_location,
+    )
+
+
+# =========================
+# Prompt sets for Option 1 and Option 2
+# =========================
+
+# --- OPTION 1: Process Gap prompts ---
+PROCESS_GAP_PROMPT_1 = """
+You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, and continuous improvement.
+
+You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
+
+Your mission:
+Analyze all records together and identify the 5 most critical underlying process gaps that allowed these issues to escape internal controls and reach the customer.
+
+Definition of Process Gap:
+A process gap is a specific missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle that, if properly implemented, would have prevented the issue or detected it before customer impact.
+
+Primary Objective:
+Return highly precise, evidence-based, non-generic, management-ready insights that can be directly translated into preventive process improvements.
+
+MANDATORY RULES:
+1. Use only facts explicitly present in the input.
+2. Do NOT assume missing details or use external knowledge.
+3. Every gap MUST be supported by clear evidence from the input.
+4. Do NOT produce vague statements such as:
+   - Improve testing
+   - Improve communication
+   - Follow best practices
+   - Increase ownership
+5. Each gap must point to an exact broken or missing control such as:
+   - lifecycle step
+   - approval gate
+   - checklist item
+   - template field
+   - review mechanism
+   - validation rule
+   - monitoring control
+   - handoff process
+   - release criterion
+   - training control
+6. Each gap must be unique, non-overlapping, and not a reworded duplicate.
+7. Prefer systemic gaps that explain multiple issues over isolated one-off observations.
+8. Prioritize gaps with the highest business value if fixed.
+9. Be concise, specific, practical, and executive-friendly.
+10. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
+
+IMPACT PRIORITIZATION (use for ranking):
+Sort highest to lowest using these factors:
+- Severity of customer/business impact
+- Likelihood of recurrence
+- Failure to detect earlier in lifecycle
+- Breadth across modules, teams, releases, or customers
+- Ease and value of preventive implementation
+
+ANALYSIS LENSES (use internally only, do not output):
+- Requirements completeness and ambiguity
+- Design review effectiveness
+- Code review rigor
+- Unit / integration / regression coverage
+- Negative and edge-case testing
+- Environment and configuration parity
+- Data validation and error handling
+- Monitoring, logging, and alerting
+- Release readiness review rigor
+- Change management controls
+- Deployment validation
+- Ownership and handoff clarity
+- SOP / checklist compliance
+- Risk assessment quality
+- Documentation quality
+- Training readiness
+- Dependency and interface validation
+
+OUTPUT INSTRUCTIONS:
+Return ONLY valid JSON.
+No markdown.
+No explanations.
+No comments.
+No extra text.
+
+Return exactly 5 objects in a JSON array, sorted by highest impact first.
+
+JSON Schema:
+[
+  {{
+    "number": 1,
+    "title": "Short specific gap title (max 10 words)",
+    "process_area": "Exact affected lifecycle stage, gate, checklist, review, artifact, or control",
+    "description": "Precise description of what control was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control must now be added or strengthened.",
+    "evidence": "Short quote or concise paraphrase from the input directly supporting this gap",
+    "recommended_fix": "Concrete action that can be implemented immediately, including where in the process it should be added."
+  }}
+]
+
+Context:
+{combined_descriptions}
+""".strip()
+
+PROCESS_GAP_PROMPT_2 = """
+You are an expert process gap analyst in quality engineering with over 20 years of experience in root-cause analysis and preventive process improvement.
+
+You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions.
+
+Task:
+Analyze the provided Lessons Learned texts thoroughly. Identify the exact process gaps in the organization's standard processes that allowed these issues to reach the customer. For each gap, you must clearly point to a specific missing, weak, or unenforced control such as a step, gate, checklist item, template field, review mechanism, or validation rule.
+
+Strict Rules you MUST follow:
+- Identify only high-impact, clearly supported process gaps. Never invent, assume, or stretch any gap that is not directly evident from the input text.
+- Generate between 1 and 8 unique gaps. Return fewer if the input supports only a small number of strong gaps. Do not fabricate gaps to reach a higher number.
+- All gaps must be distinct with no overlapping or similar themes.
+- Be extremely precise and specific. Avoid any generic language.
+- Every identified gap must be directly traceable to evidence in the provided Lessons Learned text.
+
+Output Requirements:
+Return ONLY a valid JSON array. Do not include any markdown, explanations, code blocks, or extra text outside the JSON.
+
+Each object in the array must contain exactly these keys:
+{{
+  "number": integer starting from 1,
+  "title": "short crisp title of the process gap (maximum 8 words)",
+  "process_area": "exact name of the affected process, phase, gate, checklist, template, or artifact",
+  "gap_description": "precise description of what is missing, inadequate, or not being enforced",
+  "evidence": "short direct quote or concise paraphrase from the Lessons Learned text that supports this gap",
+  "recommended_fix": "concrete, immediately actionable recommendation to close the gap"
+}}
+
+Sort the JSON array by descending impact (highest impact gap first).
+
+Context:
+{combined_descriptions}
+""".strip()
+
+# --- OPTION 2: Comment Summary prompts ---
+COMMENT_SUMMARY_PROMPT_1 = """
+You are a Senior Quality Intelligence Analyst specializing in extracting actionable insights from JIRA SPRLL (Lessons Learned) tickets.
+
+You will receive:
+1. Assignee name
+2. Full JIRA comment history (author + timestamp + comment text)
+
+Your task:
+Summarize ONLY the meaningful comments written by the assignee.
+
+Primary Objective:
+Extract precise, evidence-based quality information that supports decision-making, lessons learned, process improvement, ownership clarity, and defect prevention.
+
+Definition of Meaningful Comment:
+Any assignee comment containing one or more of the following:
+- root cause or technical explanation
+- defect behavior or limitation
+- ownership clarification
+- fix status or workaround
+- corrective or preventive action
+- scope clarification
+- dependency or handoff
+- validation result
+- why request is invalid / not a defect
+- next required action
+- process learning
+
+Strict Rules:
+1. Use ONLY comments authored by the assignee.
+2. Ignore comments from all other users.
+3. Match assignee names robustly (full name, short name, display variation, case differences).
+4. Consider chronology: newer assignee comments override older comments if contradictory.
+5. Ignore greetings, acknowledgements, reminders, approvals, status chatter, or text with no actionable value.
+6. Do NOT infer beyond what is explicitly written.
+7. Do NOT hallucinate missing context.
+8. If meaning is unclear or evidence is insufficient, state that clearly.
+9. Keep output concise, factual, and management-ready.
+10. Preserve critical qualifiers such as "internal only", "invalid request", "covered by existing ticket", "pending other team", etc.
+
+Output Instructions:
+Return ONLY valid JSON. No markdown, no extra text.
+
+Schema:
+{{
+  "assignee": "Exact assignee name",
+  "summary": "Concise summary of only the assignee's meaningful comments, highlighting decisions, technical findings, ownership, and required actions.",
+  "key_points": [
+    "Specific actionable point 1",
+    "Specific actionable point 2",
+    "Specific actionable point 3"
+  ],
+  "evidence": [
+    "Short direct quote or concise paraphrase from assignee comments"
+  ],
+  "confidence": "High / Medium / Low"
+}}
+
+SPRLL: {sprll_number}
+Issue Summary: {issue_summary}
+Issue Description: {issue_description}
+Assignee: {assignee_name}
+
+Assignee Comments:
+{comments_text}
+""".strip()
+
+COMMENT_SUMMARY_PROMPT_2 = """
+You are an expert quality engineering analyst specializing in extracting actionable insights from Jira comments for SPRLL and process improvement.
+
+Input: ONLY the comments written by the assignee ({assignee_name}) from a Jira SPRLL ticket. These comments are the ONLY source of truth. Do not use any information from the ticket description, root cause, or other fields.
+
+Task:
+Analyze the assignee's comments and produce a precise summary focused solely on high-quality, actionable information relevant to process gaps or preventive actions.
+
+Strict Rules (MUST follow):
+- Extract only specific, concrete details that can be directly translated into action (e.g., decisions on visibility, documentation, internal profiles, fixes, or invalidations).
+- Never include generic statements, opinions, or vague summaries.
+- Do not infer, assume, or add any information not explicitly stated in the assignee's comments.
+- If the comments lack clear actionable content or contain ambiguity, explicitly state the limitation instead of guessing.
+- Keep output concise, factual, and strictly grounded.
+
+Return ONLY the following valid JSON object. No explanations, markdown, or extra text:
+
+{{
+  "summary": "concise paragraph (2-4 sentences maximum) containing only high-quality actionable insights from the assignee's comments",
+  "key_actions_or_decisions": ["array of specific decisions, clarifications, or actions mentioned. Use empty array [] if none found"],
+  "process_relevance": "one short sentence stating relevance to process gaps/lessons learned, or 'No clear process insight from assignee comments' if none",
+  "limitations": "any notes on unclear, ambiguous, or missing information (empty string if everything is clear)"
+}}
+
+SPRLL: {sprll_number}
+Issue Summary: {issue_summary}
+
+Assignee Comments:
+{comments_text}
+""".strip()
 
 
 def _build_summary_prompt(
@@ -194,30 +405,24 @@ def _build_summary_prompt(
     issue_summary: str,
     issue_description: str,
     comments_text: str,
+    assignee_name: str = "",
+    prompt_option: int = 1,
 ) -> str:
-    return f"""
-You are a quality/process analyst.
-Summarize assignee comments for one SPRLL issue.
-Focus on: completed work, blockers, risks, root causes, and next actions.
-Be concise, accurate, and do not invent information.
-
-SPRLL: {sprll_number}
-Issue Summary: {issue_summary}
-Issue Description: {issue_description}
-
-Assignee Comments:
-{comments_text}
-
-Return plain text in this exact structure:
-Executive Summary:
-- ...
-
-Key Issues:
-- ...
-
-Recommended Actions:
-- ...
-""".strip()
+    if prompt_option == 2:
+        return COMMENT_SUMMARY_PROMPT_2.format(
+            sprll_number=sprll_number,
+            issue_summary=issue_summary,
+            comments_text=comments_text,
+            assignee_name=assignee_name,
+        )
+    else:
+        return COMMENT_SUMMARY_PROMPT_1.format(
+            sprll_number=sprll_number,
+            issue_summary=issue_summary,
+            issue_description=issue_description,
+            comments_text=comments_text,
+            assignee_name=assignee_name,
+        )
 
 
 def _summarize_with_vertex(
@@ -225,15 +430,16 @@ def _summarize_with_vertex(
     issue_summary: str,
     issue_description: str,
     assignee_comments: List[str],
+    assignee_name: str = "",
+    prompt_option: int = 1,
 ) -> str:
-    """Generate an LLM summary of the assignee's comments."""
     if not assignee_comments:
         return "No assignee comments found."
 
-    model = _get_vertex_model()
+    client = _get_genai_client()
+    s = get_settings()
 
     comments_text = "\n\n".join(f"- {c}" for c in assignee_comments)
-    # Truncate to stay within token limits
     comments_text = comments_text[:12000]
     issue_description = (issue_description or "")[:4000]
 
@@ -242,14 +448,20 @@ def _summarize_with_vertex(
         issue_summary=issue_summary,
         issue_description=issue_description,
         comments_text=comments_text,
+        assignee_name=assignee_name,
+        prompt_option=prompt_option,
     )
 
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.2, "max_output_tokens": 800},
+        response = client.models.generate_content(
+            model=s.vertex_model,
+            contents=prompt,
+            config=GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=800,
+            ),
         )
-        text = getattr(response, "text", None)
+        text = response.text
         if text and text.strip():
             return text.strip()
         return (
@@ -275,37 +487,45 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
-def generate_process_gaps(combined_descriptions: str) -> List[Dict[str, Any]]:
-    model = _get_vertex_model()
+def generate_process_gaps(
+    combined_descriptions: str, prompt_option: int = 1
+) -> List[Dict[str, Any]]:
+    client = _get_genai_client()
+    s = get_settings()
 
-    prompt = f"""
-Return ONLY a JSON array of exactly 5 objects.
-Each object must contain:
-- number (1..5)
-- title
-- description
-
-Context:
-{combined_descriptions}
-""".strip()
+    if prompt_option == 2:
+        prompt = PROCESS_GAP_PROMPT_2.format(combined_descriptions=combined_descriptions)
+    else:
+        prompt = PROCESS_GAP_PROMPT_1.format(combined_descriptions=combined_descriptions)
 
     try:
-        resp = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.3, "max_output_tokens": 1200},
+        resp = client.models.generate_content(
+            model=s.vertex_model,
+            contents=prompt,
+            config=GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=2000,
+            ),
         )
-        text = _strip_code_fences(getattr(resp, "text", "") or "[]")
+        text = _strip_code_fences(resp.text or "[]")
         gaps = json.loads(text)
 
-        while len(gaps) < 5:
-            gaps.append(
-                {
-                    "number": len(gaps) + 1,
-                    "title": f"Quality Gate {len(gaps) + 1}",
-                    "description": "Ensure quality checks are completed.",
-                }
-            )
-        return gaps[:5]
+        if prompt_option == 1:
+            while len(gaps) < 5:
+                gaps.append(
+                    {
+                        "number": len(gaps) + 1,
+                        "title": f"Quality Gate {len(gaps) + 1}",
+                        "process_area": "N/A",
+                        "description": "Insufficient evidence to identify additional gap.",
+                        "evidence": "N/A",
+                        "recommended_fix": "N/A",
+                    }
+                )
+            return gaps[:5]
+        else:
+            # Option 2 returns 1-8 gaps
+            return gaps[:8]
     except Exception as e:
         return [
             {
@@ -360,10 +580,6 @@ def _save_to_mongodb(
     generated_summary: str,
     missing_fields: List[str],
 ) -> bool:
-    """
-    Save issue + comments + generated summary to MongoDB.
-    Uses upsert so repeated runs update the same document.
-    """
     collection = _get_issue_collection()
     if collection is None:
         print("[WARN] MongoDB collection not available. Skipping save.")
@@ -402,7 +618,6 @@ def _save_to_mongodb(
 
 
 def _load_from_mongodb(key: str) -> Optional[Dict[str, Any]]:
-    """Load a previously-saved issue document from MongoDB."""
     collection = _get_issue_collection()
     if collection is None:
         return None
@@ -443,14 +658,9 @@ def search_sprll_numbers(from_date: str, to_date: str, discipline: str) -> List[
 # =========================
 # Core: fetch + extract + summarise + store
 # =========================
-def _fetch_and_process_issue(sprll_number: str) -> Dict[str, Any]:
-    """
-    1. Fetch from Jira REST API
-    2. Extract fields, assignee comments
-    3. Generate LLM summary via Vertex AI
-    4. Save everything to MongoDB
-    5. Return the complete document
-    """
+def _fetch_and_process_issue(
+    sprll_number: str, prompt_option: int = 1
+) -> Dict[str, Any]:
     s = get_settings()
     sprll_number = _normalize_sprll_number(sprll_number)
     url = f"{s.jira_domain}/rest/api/2/issue/{sprll_number}"
@@ -496,38 +706,28 @@ def _fetch_and_process_issue(sprll_number: str) -> Dict[str, Any]:
     issue_json = resp.json()
     fields = issue_json.get("fields", {})
 
-    # --- Extract fields (matching reference script exactly) ---
     issue_key = issue_json.get("key", sprll_number)
-
     summary = fields.get("summary", "") or ""
-
     description_raw = fields.get("description")
     description = adf_to_text(description_raw).strip() if description_raw else ""
-
     discipline = _extract_discipline(fields)
-
     status_obj = fields.get("status") or {}
     status = (
         status_obj.get("name") if isinstance(status_obj, dict) else str(status_obj)
     ) or ""
-
     assignee_name = _extract_assignee_name(fields)
-
-    # --- Extract assignee comments ---
     assignee_comments = _extract_assignee_comments(issue_json, assignee_name)
-
-    # --- Missing fields check ---
     missing_fields = check_missing_fields(issue_key, fields)
 
-    # --- LLM summary ---
     generated_summary = _summarize_with_vertex(
         sprll_number=issue_key,
         issue_summary=summary,
         issue_description=description,
         assignee_comments=assignee_comments,
+        assignee_name=assignee_name,
+        prompt_option=prompt_option,
     )
 
-    # --- Save to MongoDB ---
     _save_to_mongodb(
         key=issue_key,
         summary=summary,
@@ -555,34 +755,23 @@ def _fetch_and_process_issue(sprll_number: str) -> Dict[str, Any]:
     }
 
 
-def get_or_create_issue_document(sprll_number: str) -> Dict[str, Any]:
-    """
-    Check MongoDB cache first. If found, return cached doc.
-    Otherwise fetch from Jira, process, store, and return.
-    """
+def get_or_create_issue_document(
+    sprll_number: str, prompt_option: int = 1
+) -> Dict[str, Any]:
     key = _normalize_sprll_number(sprll_number)
 
-    # Try cache
     cached = _load_from_mongodb(key)
     if cached:
         cached["source"] = "mongodb_cache"
-        # Remap for frontend compatibility
         return _ensure_frontend_keys(cached)
 
-    # Fetch fresh
-    doc = _fetch_and_process_issue(key)
+    doc = _fetch_and_process_issue(key, prompt_option=prompt_option)
     doc["source"] = "jira_fresh"
     return _ensure_frontend_keys(doc)
 
 
 def _ensure_frontend_keys(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Make sure the document has both backend storage keys and frontend display keys.
-    The frontend uses 'sprllNumber', 'discipline', 'missingFields', 'assigneeCommentSummary'.
-    MongoDB stores 'key', 'customfield_12801', 'missing_fields', 'generated_summary'.
-    """
     out = dict(doc)
-    # Frontend aliases
     out.setdefault("sprllNumber", out.get("key", ""))
     out.setdefault("discipline", out.get("customfield_12801", ""))
     out.setdefault("missingFields", out.get("missing_fields", []))
@@ -598,13 +787,14 @@ def _ensure_frontend_keys(doc: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 def fetch_issues_parallel(
     sprll_numbers: List[str],
+    prompt_option: int = 1,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
     issues: List[Dict[str, Any]] = []
     descriptions: List[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_map = {
-            executor.submit(get_or_create_issue_document, n): n
+            executor.submit(get_or_create_issue_document, n, prompt_option): n
             for n in sprll_numbers
         }
         for future in concurrent.futures.as_completed(future_map):
@@ -630,20 +820,21 @@ def fetch_issues_parallel(
 # =========================
 # Sync endpoint helper
 # =========================
-def sync_assignee_comments(sprll_numbers: List[str]) -> Dict[str, Any]:
-    """Process all given SPRLLs, store in MongoDB, return summary."""
+def sync_assignee_comments(
+    sprll_numbers: List[str], prompt_option: int = 1
+) -> Dict[str, Any]:
     collection = _get_issue_collection()
     if collection is not None:
         try:
             collection.create_index("key", unique=True)
         except PyMongoError:
-            pass  # index may already exist
+            pass
 
     stored, failed = 0, []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_map = {
-            executor.submit(get_or_create_issue_document, n): n
+            executor.submit(get_or_create_issue_document, n, prompt_option): n
             for n in sprll_numbers
         }
         for future in concurrent.futures.as_completed(future_map):

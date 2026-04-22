@@ -1,5 +1,5 @@
 """SPRLL Process Gap Analyzer - Streamlit Frontend (calls FastAPI backend)."""
-
+import json
 import os
 import re
 from datetime import date
@@ -21,14 +21,20 @@ DISCIPLINES = [
     "EMC Cloud-Software Engineering",
 ]
 
+PROMPT_OPTIONS = {
+    "Option 1 — Senior Analyst (5 gaps, evidence + fix)": 1,
+    "Option 2 — Expert Analyst (1-8 gaps, flexible depth)": 2,
+}
 
-def build_payload(mode, sprll_numbers, from_date=None, to_date=None, discipline=None):
+
+def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None):
     if mode == "Enter SPRLL Numbers manually":
-        return {"sprll_numbers": sprll_numbers}
+        return {"sprll_numbers": sprll_numbers, "prompt_option": prompt_option}
     return {
         "from_date": str(from_date),
         "to_date": str(to_date),
         "discipline": discipline,
+        "prompt_option": prompt_option,
     }
 
 
@@ -47,6 +53,18 @@ with col_logo:
 
 st.divider()
 st.subheader("Analysis Parameters")
+
+# Prompt option selector
+prompt_label = st.selectbox(
+    "Prompt Strategy",
+    list(PROMPT_OPTIONS.keys()),
+    index=0,
+    help=(
+        "Option 1: Senior Analyst — returns exactly 5 high-impact gaps with evidence and recommended fix.\n\n"
+        "Option 2: Expert Analyst — returns 1-8 gaps with flexible depth and gap_description field."
+    ),
+)
+prompt_option = PROMPT_OPTIONS[prompt_label]
 
 mode = st.radio(
     "Input mode",
@@ -105,6 +123,7 @@ if analyze_clicked:
     payload = build_payload(
         mode=mode,
         sprll_numbers=sprll_numbers,
+        prompt_option=prompt_option,
         from_date=locals().get("from_date"),
         to_date=locals().get("to_date"),
         discipline=locals().get("discipline"),
@@ -124,17 +143,18 @@ if analyze_clicked:
         issues = result.get("issues", [])
         process_gaps = result.get("process_gaps", [])
         resolved_sprll_numbers = result.get("sprll_numbers", [])
+        used_prompt = result.get("prompt_option", prompt_option)
 
         st.divider()
 
         if mode == "Search by Date & Discipline":
             st.info(
                 f"**Scope:** {from_date} → {to_date} | {discipline} | "
-                f"{len(resolved_sprll_numbers)} issue(s)"
+                f"{len(resolved_sprll_numbers)} issue(s) | Prompt Option {used_prompt}"
             )
         else:
             st.info(
-                f"**Scope:** {len(resolved_sprll_numbers)} SPRLL issue(s) analyzed"
+                f"**Scope:** {len(resolved_sprll_numbers)} SPRLL issue(s) analyzed | Prompt Option {used_prompt}"
             )
 
         # ── Issues ────────────────────────────────────────────────
@@ -175,12 +195,10 @@ if analyze_clicked:
                         )
                         st.markdown(f"**Assignee Comment Count:** {comment_count}")
 
-                    # Source badge
                     source = issue.get("source", "")
                     if source:
                         st.caption(f"📦 Source: `{source}`")
 
-                    # Description
                     if issue.get("description"):
                         desc = issue["description"]
                         st.markdown("---")
@@ -189,7 +207,6 @@ if analyze_clicked:
                             desc[:800] + ("…" if len(desc) > 800 else "")
                         )
 
-                    # Assignee comments (raw)
                     assignee_comments = issue.get("assignee_comments", [])
                     if assignee_comments:
                         st.markdown("---")
@@ -202,7 +219,6 @@ if analyze_clicked:
                                 + ("…" if len(comment_text) > 600 else "")
                             )
 
-                    # LLM-generated summary
                     gen_summary = issue.get(
                         "assigneeCommentSummary",
                         issue.get("generated_summary", ""),
@@ -210,18 +226,65 @@ if analyze_clicked:
                     if gen_summary:
                         st.markdown("---")
                         st.markdown("**🤖 AI-Generated Summary:**")
-                        st.markdown(gen_summary)
+                        # Try to parse JSON summary for structured display
+                        try:
+                            summary_json = json.loads(gen_summary)
+                            if isinstance(summary_json, dict):
+                                if "summary" in summary_json:
+                                    st.markdown(f"**Summary:** {summary_json['summary']}")
+                                if "key_points" in summary_json:
+                                    st.markdown("**Key Points:**")
+                                    for kp in summary_json["key_points"]:
+                                        st.markdown(f"- {kp}")
+                                if "key_actions_or_decisions" in summary_json:
+                                    st.markdown("**Key Actions/Decisions:**")
+                                    for ka in summary_json["key_actions_or_decisions"]:
+                                        st.markdown(f"- {ka}")
+                                if "evidence" in summary_json:
+                                    st.markdown("**Evidence:**")
+                                    if isinstance(summary_json["evidence"], list):
+                                        for ev in summary_json["evidence"]:
+                                            st.markdown(f"- {ev}")
+                                    else:
+                                        st.markdown(str(summary_json["evidence"]))
+                                if "confidence" in summary_json:
+                                    st.markdown(f"**Confidence:** {summary_json['confidence']}")
+                                if "process_relevance" in summary_json:
+                                    st.markdown(f"**Process Relevance:** {summary_json['process_relevance']}")
+                                if "limitations" in summary_json and summary_json["limitations"]:
+                                    st.markdown(f"**Limitations:** {summary_json['limitations']}")
+                            else:
+                                st.markdown(gen_summary)
+                        except (json.JSONDecodeError, TypeError):
+                            st.markdown(gen_summary)
 
         # ── Process Gaps ──────────────────────────────────────────
         st.divider()
         st.subheader("Process Gap Checklist for Release Readiness Review")
-        st.caption("AI-generated by backend based on combined SPRLL descriptions")
+        st.caption(f"AI-generated (Prompt Option {used_prompt}) based on combined SPRLL descriptions")
 
         for gap in process_gaps:
-            st.markdown(
-                f"**{gap.get('number', '-')}. {gap.get('title', 'Untitled')}**"
-            )
-            st.markdown(f"> {gap.get('description', '')}")
+            num = gap.get("number", "-")
+            title = gap.get("title", "Untitled")
+            st.markdown(f"**{num}. {title}**")
+
+            # Process area
+            if gap.get("process_area"):
+                st.markdown(f"**Process Area:** {gap['process_area']}")
+
+            # Description (Option 1) or gap_description (Option 2)
+            desc = gap.get("description") or gap.get("gap_description", "")
+            if desc:
+                st.markdown(f"> {desc}")
+
+            # Evidence
+            if gap.get("evidence"):
+                st.markdown(f"**Evidence:** _{gap['evidence']}_")
+
+            # Recommended fix
+            if gap.get("recommended_fix"):
+                st.markdown(f"**Recommended Fix:** {gap['recommended_fix']}")
+
             st.write("")
 
     except Exception as e:

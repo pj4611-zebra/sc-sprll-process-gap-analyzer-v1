@@ -27,6 +27,7 @@ class AnalyzeRequest(BaseModel):
     from_date: Optional[str] = None
     to_date: Optional[str] = None
     discipline: Optional[str] = None
+    prompt_option: int = Field(default=1, ge=1, le=2)
 
 
 class CommentSyncRequest(BaseModel):
@@ -34,6 +35,7 @@ class CommentSyncRequest(BaseModel):
     from_date: Optional[str] = None
     to_date: Optional[str] = None
     discipline: Optional[str] = None
+    prompt_option: int = Field(default=1, ge=1, le=2)
 
 
 def resolve_sprll_numbers(payload) -> List[str]:
@@ -60,8 +62,9 @@ def analyze(payload: AnalyzeRequest):
     if not sprll_numbers:
         raise HTTPException(status_code=404, detail="No SPRLL issues found.")
 
-    # Fetch from cache (MongoDB) or Jira, process, and store.
-    issues, descriptions = fetch_issues_parallel(sprll_numbers)
+    prompt_option = payload.prompt_option
+
+    issues, descriptions = fetch_issues_parallel(sprll_numbers, prompt_option=prompt_option)
     combined = (
         "\n\n---\n\n".join(descriptions)
         if descriptions
@@ -71,7 +74,8 @@ def analyze(payload: AnalyzeRequest):
     return {
         "sprll_numbers": sprll_numbers,
         "issues": issues,
-        "process_gaps": generate_process_gaps(combined),
+        "process_gaps": generate_process_gaps(combined, prompt_option=prompt_option),
+        "prompt_option": prompt_option,
     }
 
 
@@ -80,6 +84,6 @@ def comments_sync(payload: CommentSyncRequest):
     sprll_numbers = resolve_sprll_numbers(payload)
     if not sprll_numbers:
         raise HTTPException(status_code=404, detail="No SPRLL issues found.")
-    result = sync_assignee_comments(sprll_numbers)
+    result = sync_assignee_comments(sprll_numbers, prompt_option=payload.prompt_option)
     result["sprll_numbers"] = sprll_numbers
     return result
