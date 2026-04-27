@@ -24,6 +24,8 @@ FIELD_MAPPING = {
     "description": "Description",
     "customfield_12801": "Discipline",
     "status": "Status",
+    "customfield_14501": "LL Type - Primary",
+    "customfield_14502": "LL Type - Secondary",
 }
 
 
@@ -529,7 +531,6 @@ def generate_process_gaps(
                 )
             return gaps[:5]
         else:
-            # Option 2 returns 1-8 gaps
             return gaps[:8]
     except Exception as e:
         return [
@@ -585,6 +586,8 @@ def _save_to_mongodb(
     assignee_comments: List[str],
     generated_summary: str,
     missing_fields: List[str],
+    ll_type_primary: str = "",
+    ll_type_secondary: str = "",
 ) -> bool:
     collection = _get_issue_collection()
     if collection is None:
@@ -603,6 +606,8 @@ def _save_to_mongodb(
             "generated_summary": generated_summary,
             "comment_count": len(assignee_comments),
             "missing_fields": missing_fields,
+            "ll_type_primary": ll_type_primary,
+            "ll_type_secondary": ll_type_secondary,
             "processed_at": datetime.now(timezone.utc),
         }
 
@@ -664,6 +669,24 @@ def search_sprll_numbers(from_date: str, to_date: str, discipline: str) -> List[
 # =========================
 # Core: fetch + extract + summarise + store
 # =========================
+def _extract_custom_field_value(fields: Dict[str, Any], field_id: str) -> str:
+    """Extract a string value from a Jira custom field (handles dict/list/str)."""
+    raw = fields.get(field_id)
+    if raw is None:
+        return ""
+    if isinstance(raw, dict):
+        return raw.get("value") or raw.get("name") or json.dumps(raw)
+    if isinstance(raw, list):
+        vals = []
+        for item in raw:
+            if isinstance(item, dict):
+                vals.append(item.get("value") or item.get("name") or str(item))
+            else:
+                vals.append(str(item))
+        return ", ".join(v for v in vals if v)
+    return str(raw)
+
+
 def _fetch_and_process_issue(
     sprll_number: str, prompt_option: int = 1
 ) -> Dict[str, Any]:
@@ -676,7 +699,7 @@ def _fetch_and_process_issue(
             url,
             headers=_jira_headers(),
             params={
-                "fields": "summary,description,status,assignee,comment,customfield_12801"
+                "fields": "summary,description,status,assignee,comment,customfield_12801,customfield_14501,customfield_14502"
             },
             timeout=30,
         )
@@ -723,6 +746,8 @@ def _fetch_and_process_issue(
     ) or ""
     assignee_name = _extract_assignee_name(fields)
     assignee_comments = _extract_assignee_comments(issue_json, assignee_name)
+    ll_type_primary = _extract_custom_field_value(fields, "customfield_14501")
+    ll_type_secondary = _extract_custom_field_value(fields, "customfield_14502")
     missing_fields = check_missing_fields(issue_key, fields)
 
     generated_summary = _summarize_with_vertex(
@@ -744,6 +769,8 @@ def _fetch_and_process_issue(
         assignee_comments=assignee_comments,
         generated_summary=generated_summary,
         missing_fields=missing_fields,
+        ll_type_primary=ll_type_primary,
+        ll_type_secondary=ll_type_secondary,
     )
 
     return {
@@ -757,6 +784,8 @@ def _fetch_and_process_issue(
         "generated_summary": generated_summary,
         "comment_count": len(assignee_comments),
         "missing_fields": missing_fields,
+        "ll_type_primary": ll_type_primary,
+        "ll_type_secondary": ll_type_secondary,
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -785,6 +814,8 @@ def _ensure_frontend_keys(doc: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("matchedCommentCount", out.get("comment_count", 0))
     out.setdefault("assignee_comments", out.get("assignee_comments", []))
     out.setdefault("assignee_name", out.get("assignee_name", ""))
+    out.setdefault("ll_type_primary", out.get("ll_type_primary", ""))
+    out.setdefault("ll_type_secondary", out.get("ll_type_secondary", ""))
     return out
 
 

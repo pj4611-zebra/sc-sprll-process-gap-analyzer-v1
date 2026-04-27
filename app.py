@@ -1,4 +1,5 @@
 """SPRLL Process Gap Analyzer - Streamlit Frontend (calls FastAPI backend)."""
+import io
 import json
 import os
 import re
@@ -13,6 +14,12 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+except ImportError:
+    Workbook = None
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
 
@@ -36,6 +43,88 @@ def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=No
         "discipline": discipline,
         "prompt_option": prompt_option,
     }
+
+
+def generate_missing_fields_excel(issues):
+    """Generate an Excel report of missing fields per SPRLL issue."""
+    if Workbook is None:
+        return None
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Missing Fields Report"
+
+    # Styles
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    error_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    error_font = Font(color="9C0006")
+    wrap_alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Headers
+    headers = ["SPRLL Number", "Summary", "Status", "Discipline", "Missing Fields", "Remarks"]
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = wrap_alignment
+
+    # Data rows
+    row = 2
+    for issue in issues:
+        sprll_num = issue.get("sprllNumber", issue.get("key", ""))
+        has_error = issue.get("error")
+
+        ws.cell(row=row, column=1, value=sprll_num).alignment = wrap_alignment
+
+        if has_error:
+            # Not a valid SPRLL or fetch failed
+            ws.cell(row=row, column=2, value="—").alignment = wrap_alignment
+            ws.cell(row=row, column=3, value="—").alignment = wrap_alignment
+            ws.cell(row=row, column=4, value="—").alignment = wrap_alignment
+            ws.cell(row=row, column=5, value="—").alignment = wrap_alignment
+            remark_cell = ws.cell(row=row, column=6, value=f"Not a proper SPRLL number or fetch error: {has_error}")
+            remark_cell.alignment = wrap_alignment
+            remark_cell.fill = error_fill
+            remark_cell.font = error_font
+        else:
+            summary = issue.get("summary", "—")
+            status = issue.get("status", "—")
+            discipline = issue.get("discipline", issue.get("customfield_12801", "—"))
+            missing = issue.get("missingFields", issue.get("missing_fields", []))
+            missing_str = ", ".join(missing) if missing else "None"
+
+            ws.cell(row=row, column=2, value=summary).alignment = wrap_alignment
+            ws.cell(row=row, column=3, value=status).alignment = wrap_alignment
+            ws.cell(row=row, column=4, value=discipline).alignment = wrap_alignment
+            ws.cell(row=row, column=5, value=missing_str).alignment = wrap_alignment
+
+            if missing:
+                remark = f"{len(missing)} field(s) missing"
+                remark_cell = ws.cell(row=row, column=6, value=remark)
+                remark_cell.alignment = wrap_alignment
+                remark_cell.fill = error_fill
+                remark_cell.font = error_font
+            else:
+                ws.cell(row=row, column=6, value="All required fields present").alignment = wrap_alignment
+
+        row += 1
+
+    # Column widths
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 30
+    ws.column_dimensions["E"].width = 45
+    ws.column_dimensions["F"].width = 45
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 st.set_page_config(
@@ -145,6 +234,9 @@ if analyze_clicked:
         resolved_sprll_numbers = result.get("sprll_numbers", [])
         used_prompt = result.get("prompt_option", prompt_option)
 
+        # Store issues in session state for download
+        st.session_state["last_issues"] = issues
+
         st.divider()
 
         if mode == "Search by Date & Discipline":
@@ -159,6 +251,20 @@ if analyze_clicked:
 
         # ── Issues ────────────────────────────────────────────────
         st.subheader(f"Issues Analyzed ({len(issues)})")
+
+        # Download missing fields report button
+        if Workbook is not None:
+            excel_buffer = generate_missing_fields_excel(issues)
+            if excel_buffer:
+                st.download_button(
+                    label="📥 Download Missing Fields Report (Excel)",
+                    data=excel_buffer,
+                    file_name="sprll_missing_fields_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        else:
+            st.warning("Install `openpyxl` to enable Excel download: `pip install openpyxl`")
+
         for issue in issues:
             label = (
                 f"{issue.get('sprllNumber', issue.get('key', 'SPRLL'))} — "

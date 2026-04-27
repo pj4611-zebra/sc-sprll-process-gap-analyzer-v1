@@ -80,3 +80,4 @@ requests
 streamlit
 truststore
 google-genai
+openpyxl
