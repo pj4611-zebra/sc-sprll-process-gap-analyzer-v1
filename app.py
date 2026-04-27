@@ -285,6 +285,11 @@ if analyze_clicked:
             if gap.get("recommended_fix"):
                 st.markdown(f"**Recommended Fix:** {gap['recommended_fix']}")
 
+            # Related SPRLLs
+            if gap.get("related_sprll"):
+                sprll_list = ", ".join(gap["related_sprll"])
+                st.markdown(f"**🔗 Related SPRLL(s):** `{sprll_list}`")
+
             st.write("")
 
     except Exception as e:

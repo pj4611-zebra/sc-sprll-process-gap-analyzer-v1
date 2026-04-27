@@ -178,7 +178,7 @@ def _get_genai_client() -> genai.Client:
 PROCESS_GAP_PROMPT_1 = """
 You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, and continuous improvement.
 
-You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
+You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
 
 Your mission:
 Analyze all records together and identify the 5 most critical underlying process gaps that allowed these issues to escape internal controls and reach the customer.
@@ -214,6 +214,7 @@ MANDATORY RULES:
 8. Prioritize gaps with the highest business value if fixed.
 9. Be concise, specific, practical, and executive-friendly.
 10. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
+11. Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
 
 IMPACT PRIORITIZATION (use for ranking):
 Sort highest to lowest using these factors:
@@ -259,7 +260,8 @@ JSON Schema:
     "process_area": "Exact affected lifecycle stage, gate, checklist, review, artifact, or control",
     "description": "Precise description of what control was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control must now be added or strengthened.",
     "evidence": "Short quote or concise paraphrase from the input directly supporting this gap",
-    "recommended_fix": "Concrete action that can be implemented immediately, including where in the process it should be added."
+    "recommended_fix": "Concrete action that can be implemented immediately, including where in the process it should be added.",
+    "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
   }}
 ]
 
@@ -270,7 +272,7 @@ Context:
 PROCESS_GAP_PROMPT_2 = """
 You are an expert process gap analyst in quality engineering with over 20 years of experience in root-cause analysis and preventive process improvement.
 
-You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions.
+You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
 
 Task:
 Analyze the provided Lessons Learned texts thoroughly. Identify the exact process gaps in the organization's standard processes that allowed these issues to reach the customer. For each gap, you must clearly point to a specific missing, weak, or unenforced control such as a step, gate, checklist item, template field, review mechanism, or validation rule.
@@ -281,6 +283,7 @@ Strict Rules you MUST follow:
 - All gaps must be distinct with no overlapping or similar themes.
 - Be extremely precise and specific. Avoid any generic language.
 - Every identified gap must be directly traceable to evidence in the provided Lessons Learned text.
+- Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
 
 Output Requirements:
 Return ONLY a valid JSON array. Do not include any markdown, explanations, code blocks, or extra text outside the JSON.
@@ -292,7 +295,8 @@ Each object in the array must contain exactly these keys:
   "process_area": "exact name of the affected process, phase, gate, checklist, template, or artifact",
   "gap_description": "precise description of what is missing, inadequate, or not being enforced",
   "evidence": "short direct quote or concise paraphrase from the Lessons Learned text that supports this gap",
-  "recommended_fix": "concrete, immediately actionable recommendation to close the gap"
+  "recommended_fix": "concrete, immediately actionable recommendation to close the gap",
+  "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
 }}
 
 Sort the JSON array by descending impact (highest impact gap first).
@@ -520,6 +524,7 @@ def generate_process_gaps(
                         "description": "Insufficient evidence to identify additional gap.",
                         "evidence": "N/A",
                         "recommended_fix": "N/A",
+                        "related_sprll": [],
                     }
                 )
             return gaps[:5]
@@ -532,6 +537,7 @@ def generate_process_gaps(
                 "number": i + 1,
                 "title": f"Process Gap {i + 1}",
                 "description": f"AI generation failed: {type(e).__name__}: {e}",
+                "related_sprll": [],
             }
             for i in range(5)
         ]
@@ -811,7 +817,8 @@ def fetch_issues_parallel(
                 }
             issues.append(issue)
             if not issue.get("error") and issue.get("description"):
-                descriptions.append(issue["description"])
+                key = issue.get("sprllNumber", issue.get("key", ""))
+                descriptions.append(f"[{key}]\n{issue['description']}")
 
     issues.sort(key=lambda x: x.get("sprllNumber", x.get("key", "")))
     return issues, descriptions
