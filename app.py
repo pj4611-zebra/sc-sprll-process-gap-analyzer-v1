@@ -130,7 +130,7 @@ if analyze_clicked:
     )
 
     try:
-        with st.spinner("Calling backend /api/analyze …"):
+        with st.spinner("Fetching the result from the Vertex AI"):
             resp = req_lib.post(
                 f"{BACKEND_URL}/api/analyze", json=payload, timeout=180
             )

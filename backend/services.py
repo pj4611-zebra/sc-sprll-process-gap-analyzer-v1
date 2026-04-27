@@ -503,7 +503,7 @@ def generate_process_gaps(
             model=s.vertex_model,
             contents=prompt,
             config=GenerateContentConfig(
-                temperature=0.3,
+                temperature=0.0,
                 max_output_tokens=2000,
             ),
         )
