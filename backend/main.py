@@ -62,7 +62,8 @@ def analyze(payload: AnalyzeRequest):
     if not sprll_numbers:
         raise HTTPException(status_code=404, detail="No SPRLL issues found.")
 
-    prompt_option = payload.prompt_option
+    # Always use prompt option 1
+    prompt_option = 1
 
     issues, descriptions = fetch_issues_parallel(sprll_numbers, prompt_option=prompt_option)
     combined = (
@@ -84,6 +85,6 @@ def comments_sync(payload: CommentSyncRequest):
     sprll_numbers = resolve_sprll_numbers(payload)
     if not sprll_numbers:
         raise HTTPException(status_code=404, detail="No SPRLL issues found.")
-    result = sync_assignee_comments(sprll_numbers, prompt_option=payload.prompt_option)
+    result = sync_assignee_comments(sprll_numbers, prompt_option=1)
     result["sprll_numbers"] = sprll_numbers
     return result

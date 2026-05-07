@@ -28,11 +28,6 @@ DISCIPLINES = [
     "EMC Cloud-Software Engineering",
 ]
 
-PROMPT_OPTIONS = {
-    "Option 1 — Senior Analyst": 1,
-    "Option 2 — Expert Analyst": 2,
-}
-
 
 def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None):
     if mode == "Enter SPRLL Numbers manually":
@@ -143,17 +138,8 @@ with col_logo:
 st.divider()
 st.subheader("Analysis Parameters")
 
-# Prompt option selector
-prompt_label = st.selectbox(
-    "Prompt Strategy",
-    list(PROMPT_OPTIONS.keys()),
-    index=0,
-    help=(
-        "Option 1: Senior Analyst — returns exactly 5 high-impact gaps with evidence and recommended fix.\n\n"
-        "Option 2: Expert Analyst — returns 1-8 gaps with flexible depth and gap_description field."
-    ),
-)
-prompt_option = PROMPT_OPTIONS[prompt_label]
+# Prompt option is fixed to Option 1 (Senior Analyst)
+prompt_option = 1
 
 mode = st.radio(
     "Input mode",
@@ -242,11 +228,11 @@ if analyze_clicked:
         if mode == "Search by Date & Discipline":
             st.info(
                 f"**Scope:** {from_date} → {to_date} | {discipline} | "
-                f"{len(resolved_sprll_numbers)} issue(s) | Prompt Option {used_prompt}"
+                f"{len(resolved_sprll_numbers)} issue(s)"
             )
         else:
             st.info(
-                f"**Scope:** {len(resolved_sprll_numbers)} SPRLL issue(s) analyzed | Prompt Option {used_prompt}"
+                f"**Scope:** {len(resolved_sprll_numbers)} SPRLL issue(s) analyzed"
             )
 
         # ── Issues ────────────────────────────────────────────────
@@ -367,7 +353,7 @@ if analyze_clicked:
         # ── Process Gaps ──────────────────────────────────────────
         st.divider()
         st.subheader("Process Gap Checklist for Release Readiness Review")
-        st.caption(f"AI-generated (Prompt Option {used_prompt}) based on combined SPRLL descriptions")
+        st.caption("AI-generated based on combined SPRLL descriptions")
 
         for gap in process_gaps:
             num = gap.get("number", "-")
@@ -394,7 +380,8 @@ if analyze_clicked:
             # Related SPRLLs
             if gap.get("related_sprll"):
                 sprll_list = ", ".join(gap["related_sprll"])
-                st.markdown(f"**🔗 Related SPRLL(s):** `{sprll_list}`")
+                st.markdown(f"**🔗 Related SPRLL(s) ({len(gap['related_sprll'])}):** `{sprll_list}`")
+                
 
             st.write("")
 

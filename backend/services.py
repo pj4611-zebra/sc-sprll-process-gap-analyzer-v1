@@ -271,43 +271,44 @@ Context:
 {combined_descriptions}
 """.strip()
 
-PROCESS_GAP_PROMPT_2 = """
-You are an expert process gap analyst in quality engineering with over 20 years of experience in root-cause analysis and preventive process improvement.
+# --- OPTION 2: Process Gap prompt (commented out for future use) ---
+# PROCESS_GAP_PROMPT_2 = """
+# You are an expert process gap analyst in quality engineering with over 20 years of experience in root-cause analysis and preventive process improvement.
+#
+# You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
+#
+# Task:
+# Analyze the provided Lessons Learned texts thoroughly. Identify the exact process gaps in the organization's standard processes that allowed these issues to reach the customer. For each gap, you must clearly point to a specific missing, weak, or unenforced control such as a step, gate, checklist item, template field, review mechanism, or validation rule.
+#
+# Strict Rules you MUST follow:
+# - Identify only high-impact, clearly supported process gaps. Never invent, assume, or stretch any gap that is not directly evident from the input text.
+# - Generate between 1 and 8 unique gaps. Return fewer if the input supports only a small number of strong gaps. Do not fabricate gaps to reach a higher number.
+# - All gaps must be distinct with no overlapping or similar themes.
+# - Be extremely precise and specific. Avoid any generic language.
+# - Every identified gap must be directly traceable to evidence in the provided Lessons Learned text.
+# - Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
+#
+# Output Requirements:
+# Return ONLY a valid JSON array. Do not include any markdown, explanations, code blocks, or extra text outside the JSON.
+#
+# Each object in the array must contain exactly these keys:
+# {{
+#   "number": integer starting from 1,
+#   "title": "short crisp title of the process gap (maximum 8 words)",
+#   "process_area": "exact name of the affected process, phase, gate, checklist, template, or artifact",
+#   "gap_description": "precise description of what is missing, inadequate, or not being enforced",
+#   "evidence": "short direct quote or concise paraphrase from the Lessons Learned text that supports this gap",
+#   "recommended_fix": "concrete, immediately actionable recommendation to close the gap",
+#   "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
+# }}
+#
+# Sort the JSON array by descending impact (highest impact gap first).
+#
+# Context:
+# {combined_descriptions}
+# """.strip()
 
-You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
-
-Task:
-Analyze the provided Lessons Learned texts thoroughly. Identify the exact process gaps in the organization's standard processes that allowed these issues to reach the customer. For each gap, you must clearly point to a specific missing, weak, or unenforced control such as a step, gate, checklist item, template field, review mechanism, or validation rule.
-
-Strict Rules you MUST follow:
-- Identify only high-impact, clearly supported process gaps. Never invent, assume, or stretch any gap that is not directly evident from the input text.
-- Generate between 1 and 8 unique gaps. Return fewer if the input supports only a small number of strong gaps. Do not fabricate gaps to reach a higher number.
-- All gaps must be distinct with no overlapping or similar themes.
-- Be extremely precise and specific. Avoid any generic language.
-- Every identified gap must be directly traceable to evidence in the provided Lessons Learned text.
-- Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
-
-Output Requirements:
-Return ONLY a valid JSON array. Do not include any markdown, explanations, code blocks, or extra text outside the JSON.
-
-Each object in the array must contain exactly these keys:
-{{
-  "number": integer starting from 1,
-  "title": "short crisp title of the process gap (maximum 8 words)",
-  "process_area": "exact name of the affected process, phase, gate, checklist, template, or artifact",
-  "gap_description": "precise description of what is missing, inadequate, or not being enforced",
-  "evidence": "short direct quote or concise paraphrase from the Lessons Learned text that supports this gap",
-  "recommended_fix": "concrete, immediately actionable recommendation to close the gap",
-  "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
-}}
-
-Sort the JSON array by descending impact (highest impact gap first).
-
-Context:
-{combined_descriptions}
-""".strip()
-
-# --- OPTION 2: Comment Summary prompts ---
+# --- Comment Summary prompts ---
 COMMENT_SUMMARY_PROMPT_1 = """
 You are a Senior Quality Intelligence Analyst specializing in extracting actionable insights from JIRA SPRLL (Lessons Learned) tickets.
 
@@ -374,6 +375,7 @@ Assignee Comments:
 {comments_text}
 """.strip()
 
+# Comment Summary Prompt 2 (kept for future use but not actively used)
 COMMENT_SUMMARY_PROMPT_2 = """
 You are an expert quality engineering analyst specializing in extracting actionable insights from Jira comments for SPRLL and process improvement.
 
@@ -414,21 +416,14 @@ def _build_summary_prompt(
     assignee_name: str = "",
     prompt_option: int = 1,
 ) -> str:
-    if prompt_option == 2:
-        return COMMENT_SUMMARY_PROMPT_2.format(
-            sprll_number=sprll_number,
-            issue_summary=issue_summary,
-            comments_text=comments_text,
-            assignee_name=assignee_name,
-        )
-    else:
-        return COMMENT_SUMMARY_PROMPT_1.format(
-            sprll_number=sprll_number,
-            issue_summary=issue_summary,
-            issue_description=issue_description,
-            comments_text=comments_text,
-            assignee_name=assignee_name,
-        )
+    # Always use prompt option 1
+    return COMMENT_SUMMARY_PROMPT_1.format(
+        sprll_number=sprll_number,
+        issue_summary=issue_summary,
+        issue_description=issue_description,
+        comments_text=comments_text,
+        assignee_name=assignee_name,
+    )
 
 
 def _summarize_with_vertex(
@@ -499,10 +494,8 @@ def generate_process_gaps(
     client = _get_genai_client()
     s = get_settings()
 
-    if prompt_option == 2:
-        prompt = PROCESS_GAP_PROMPT_2.format(combined_descriptions=combined_descriptions)
-    else:
-        prompt = PROCESS_GAP_PROMPT_1.format(combined_descriptions=combined_descriptions)
+    # Always use PROCESS_GAP_PROMPT_1
+    prompt = PROCESS_GAP_PROMPT_1.format(combined_descriptions=combined_descriptions)
 
     try:
         resp = client.models.generate_content(
@@ -516,22 +509,19 @@ def generate_process_gaps(
         text = _strip_code_fences(resp.text or "[]")
         gaps = json.loads(text)
 
-        if prompt_option == 1:
-            while len(gaps) < 5:
-                gaps.append(
-                    {
-                        "number": len(gaps) + 1,
-                        "title": f"Quality Gate {len(gaps) + 1}",
-                        "process_area": "N/A",
-                        "description": "Insufficient evidence to identify additional gap.",
-                        "evidence": "N/A",
-                        "recommended_fix": "N/A",
-                        "related_sprll": [],
-                    }
-                )
-            return gaps[:5]
-        else:
-            return gaps[:8]
+        while len(gaps) < 5:
+            gaps.append(
+                {
+                    "number": len(gaps) + 1,
+                    "title": f"Quality Gate {len(gaps) + 1}",
+                    "process_area": "N/A",
+                    "description": "Insufficient evidence to identify additional gap.",
+                    "evidence": "N/A",
+                    "recommended_fix": "N/A",
+                    "related_sprll": [],
+                }
+            )
+        return gaps[:5]
     except Exception as e:
         return [
             {
