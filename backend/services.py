@@ -178,18 +178,103 @@ def _get_genai_client() -> genai.Client:
 
 # --- OPTION 1: Process Gap prompts ---
 PROCESS_GAP_PROMPT_1 = """
-You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, and continuous improvement.
+You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
 
-You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
+You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
+​
+
+Additional Context:
+Each SPRLL may contain:
+- LL Type-Primary
+- LL Type-Secondary
+
+These fields indicate:
+- the defect escape category
+- the underlying contributing/root cause
 
 Your mission:
-Analyze all records together and identify the 5 most critical underlying process gaps that allowed these issues to escape internal controls and reach the customer.
+1. Analyze all SPRLL records together.
+2. Identify the 5 most critical underlying process gaps that allowed issues to escape internal controls and reach the customer.
+3. Classify each identified process gap into exactly ONE SDLC phase:
+   - Coding Phase
+   - Test Phase
+   - Requirement Phase
+   - Design Review Phase
+   - Deployment Phase
 
 Definition of Process Gap:
 A process gap is a specific missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle that, if properly implemented, would have prevented the issue or detected it before customer impact.
 
-Primary Objective:
-Return highly precise, evidence-based, non-generic, management-ready insights that can be directly translated into preventive process improvements.
+SDLC Phase Classification Objective:
+Determine the EARLIEST reasonable SDLC phase where the issue should ideally have been prevented or detected before reaching the customer.
+
+Core Interpretation Logic:
+- LL Type-Primary represents the escape category.
+- LL Type-Secondary represents the underlying contributing cause.
+
+MANDATORY PHASE MAPPING RULES:
+1. Config Error → Coding Phase
+2. Invalid Issue → Test Phase
+3. Third Party → Deployment Phase
+4. Deployment → Deployment Phase
+5. Code Error → Test Phase
+6. Requirements → Requirement Phase
+
+If explicit mappings above are available, ALWAYS prioritize them.
+
+Example:
+LL Type-Primary = "Test Escape"
+LL Type-Secondary = "Code Error"
+→ SDLC Phase = "Test Phase"
+because the defect escaped during testing before release.
+
+PHASE CLASSIFICATION GUIDANCE:
+
+Coding Phase:
+- Logic defects
+- Coding mistakes
+- Incorrect implementation
+- Missed validations
+- Security coding flaws
+- Incorrect fixes or code changes
+- Configuration implementation issues
+
+Test Phase:
+- Test escape
+- Missing regression coverage
+- Regression missed execution
+- Missing negative or edge-case testing
+- Validation gaps
+- Performance/security testing gaps
+- Environment/configuration testing misses
+- Incomplete test scenarios
+- Invalid issue validation misses
+- Code error escape during testing
+
+Requirement Phase:
+- Requirement ambiguity
+- Missing business rules
+- Scope misunderstanding
+- Feature parity expectations
+- Standardization gaps
+- Incorrect customer expectation handling
+- New feature requests identified as defects
+
+Design Review Phase:
+- Architectural weaknesses
+- Integration/interface design flaws
+- Workflow inconsistencies
+- Dependency handling issues
+- Scalability limitations
+- System behavior caused by design decisions
+- Incorrect orchestration between components
+
+Deployment Phase:
+- Third-party dependency issues
+- Deployment failures
+- Environment deployment mismatches
+- Release packaging/configuration problems
+- Production deployment validation gaps
 
 MANDATORY RULES:
 1. Use only facts explicitly present in the input.
@@ -216,7 +301,11 @@ MANDATORY RULES:
 8. Prioritize gaps with the highest business value if fixed.
 9. Be concise, specific, practical, and executive-friendly.
 10. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
-11. Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
+11. Every identified process gap MUST be classified into exactly ONE SDLC phase.
+12. If multiple phases seem possible, choose the EARLIEST preventable phase.
+13. Use LL Type-Primary and LL Type-Secondary as primary classification signals whenever available.
+14. If LL fields are missing or unclear, infer the SDLC phase using SPRLL evidence and best-supported engineering judgment only.
+15. Before finalizing, merge semantically overlapping gaps into a single stronger gap.
 
 IMPACT PRIORITIZATION (use for ranking):
 Sort highest to lowest using these factors:
@@ -229,7 +318,6 @@ Sort highest to lowest using these factors:
 ANALYSIS LENSES (use internally only, do not output):
 - Requirements completeness and ambiguity
 - Design review effectiveness
-- Code review rigor
 - Unit / integration / regression coverage
 - Negative and edge-case testing
 - Environment and configuration parity
@@ -259,54 +347,29 @@ JSON Schema:
   {{
     "number": 1,
     "title": "Short specific gap title (max 10 words)",
+    "phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase",
     "process_area": "Exact affected lifecycle stage, gate, checklist, review, artifact, or control",
     "description": "Precise description of what control was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control must now be added or strengthened.",
     "evidence": "Short quote or concise paraphrase from the input directly supporting this gap",
     "recommended_fix": "Concrete action that can be implemented immediately, including where in the process it should be added.",
-    "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
+    "confidence": "High | Medium | Low",
+    "related_sprll": [
+      {{
+        "key": "SPRLL-XXXX",
+        "phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase"
+      }}
+    ]
   }}
 ]
+
+RELATED SPRLL RULES:
+- "related_sprll" MUST list every SPRLL key from the input whose evidence contributed to this gap.
+- For each entry, "phase" is the SDLC phase inferred for THAT specific SPRLL record (may differ from the overall gap phase if multiple phases are represented).
+- Use only SPRLL keys explicitly present in the input.
 
 Context:
 {combined_descriptions}
 """.strip()
-
-# --- OPTION 2: Process Gap prompt (commented out for future use) ---
-# PROCESS_GAP_PROMPT_2 = """
-# You are an expert process gap analyst in quality engineering with over 20 years of experience in root-cause analysis and preventive process improvement.
-#
-# You will be given combined SPRLL texts (Lessons Learned from Customer Defects). These texts are the ONLY source of truth. You must not use any external knowledge or assumptions. Each record is tagged with its SPRLL key in square brackets (e.g. [SPRLL-1234]).
-#
-# Task:
-# Analyze the provided Lessons Learned texts thoroughly. Identify the exact process gaps in the organization's standard processes that allowed these issues to reach the customer. For each gap, you must clearly point to a specific missing, weak, or unenforced control such as a step, gate, checklist item, template field, review mechanism, or validation rule.
-#
-# Strict Rules you MUST follow:
-# - Identify only high-impact, clearly supported process gaps. Never invent, assume, or stretch any gap that is not directly evident from the input text.
-# - Generate between 1 and 8 unique gaps. Return fewer if the input supports only a small number of strong gaps. Do not fabricate gaps to reach a higher number.
-# - All gaps must be distinct with no overlapping or similar themes.
-# - Be extremely precise and specific. Avoid any generic language.
-# - Every identified gap must be directly traceable to evidence in the provided Lessons Learned text.
-# - Each gap MUST include a "related_sprll" array listing the exact SPRLL key(s) (e.g. "SPRLL-1234") from which the evidence was drawn. Use only keys present in the input tags.
-#
-# Output Requirements:
-# Return ONLY a valid JSON array. Do not include any markdown, explanations, code blocks, or extra text outside the JSON.
-#
-# Each object in the array must contain exactly these keys:
-# {{
-#   "number": integer starting from 1,
-#   "title": "short crisp title of the process gap (maximum 8 words)",
-#   "process_area": "exact name of the affected process, phase, gate, checklist, template, or artifact",
-#   "gap_description": "precise description of what is missing, inadequate, or not being enforced",
-#   "evidence": "short direct quote or concise paraphrase from the Lessons Learned text that supports this gap",
-#   "recommended_fix": "concrete, immediately actionable recommendation to close the gap",
-#   "related_sprll": ["SPRLL-XXXX", "SPRLL-YYYY"]
-# }}
-#
-# Sort the JSON array by descending impact (highest impact gap first).
-#
-# Context:
-# {combined_descriptions}
-# """.strip()
 
 # --- Comment Summary prompts ---
 COMMENT_SUMMARY_PROMPT_1 = """
@@ -654,6 +717,87 @@ def search_sprll_numbers(from_date: str, to_date: str, discipline: str) -> List[
     )
     resp.raise_for_status()
     return [i["key"] for i in resp.json().get("issues", [])]
+
+
+def search_sprll_numbers_by_jql(jql: str) -> List[str]:
+    """Search SPRLL numbers using a custom JQL query provided by the user."""
+    s = get_settings()
+    resp = req_lib.post(
+        f"{s.jira_domain}/rest/api/2/search",
+        headers=_jira_headers(),
+        json={"jql": jql, "fields": ["key", "summary"], "maxResults": 100},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return [i["key"] for i in resp.json().get("issues", [])]
+
+
+PRODUCT_SELECTION_FIELD_ID = "customfield_21800"
+DISCIPLINE_FIELD_ID_PRODUCT = "customfield_12801"
+
+
+def fetch_discipline_product_map() -> Dict[str, List[str]]:
+    """Fetch a mapping of {discipline: [products]} from SPRLL Jira issues dynamically."""
+    s = get_settings()
+    jql_query = 'project = SPRLL AND issuetype in (Process, "Lesson Learned")'
+
+    start_at = 0
+    max_results = 100
+    all_issues: List[Dict[str, Any]] = []
+
+    while True:
+        resp = req_lib.post(
+            f"{s.jira_domain}/rest/api/2/search",
+            headers=_jira_headers(),
+            json={
+                "jql": jql_query,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": ["summary", DISCIPLINE_FIELD_ID_PRODUCT, PRODUCT_SELECTION_FIELD_ID],
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        issues = data.get("issues", [])
+        all_issues.extend(issues)
+        if start_at + max_results >= data.get("total", 0):
+            break
+        start_at += max_results
+
+    discipline_product_map: Dict[str, set] = {}
+
+    for issue in all_issues:
+        fields = issue.get("fields", {})
+
+        discipline_val = fields.get(DISCIPLINE_FIELD_ID_PRODUCT)
+        disciplines: List[str] = []
+        if isinstance(discipline_val, dict):
+            d = discipline_val.get("value") or discipline_val.get("name")
+            if d:
+                disciplines = [d]
+        elif isinstance(discipline_val, list):
+            for item in discipline_val:
+                d = (item.get("value") or item.get("name")) if isinstance(item, dict) else str(item)
+                if d:
+                    disciplines.append(d)
+
+        product_val = fields.get(PRODUCT_SELECTION_FIELD_ID)
+        prod: Optional[str] = None
+        if isinstance(product_val, dict):
+            child = product_val.get("child")
+            if child and isinstance(child, dict):
+                prod = child.get("value")
+            else:
+                prod = product_val.get("value")
+
+        for disc in disciplines:
+            if disc not in discipline_product_map:
+                discipline_product_map[disc] = set()
+            if prod:
+                discipline_product_map[disc].add(prod)
+
+    return {disc: sorted(prods) for disc, prods in sorted(discipline_product_map.items())}
 
 
 # =========================

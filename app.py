@@ -1,12 +1,11 @@
-"""SPRLL Process Gap Analyzer - Streamlit Frontend (calls FastAPI backend)."""
 import io
 import json
 import os
 import re
-from datetime import date
 
 import requests as req_lib
 import streamlit as st
+from datetime import date
 
 try:
     from dotenv import load_dotenv
@@ -23,15 +22,23 @@ except ImportError:
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
 
-DISCIPLINES = [
-    "Tools-Software Engineering",
-    "EMC Cloud-Software Engineering",
-]
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_discipline_product_map() -> dict:
+    """Fetch {discipline: [products]} map from backend, cached for 1 hour."""
+    try:
+        resp = req_lib.get(f"{BACKEND_URL}/api/discipline-products", timeout=120)
+        if resp.ok:
+            return resp.json().get("discipline_products", {})
+    except Exception:
+        pass
+    return {}
 
 
-def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None):
+def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None, products=None, custom_jql=None):
     if mode == "Enter SPRLL Numbers manually":
         return {"sprll_numbers": sprll_numbers, "prompt_option": prompt_option}
+    if custom_jql:
+        return {"custom_jql": custom_jql, "prompt_option": prompt_option}
     return {
         "from_date": str(from_date),
         "to_date": str(to_date),
@@ -73,7 +80,6 @@ def generate_missing_fields_excel(issues):
         ws.cell(row=row, column=1, value=sprll_num).alignment = wrap_alignment
 
         if has_error:
-            # Not a valid SPRLL or fetch failed
             ws.cell(row=row, column=2, value="—").alignment = wrap_alignment
             ws.cell(row=row, column=3, value="—").alignment = wrap_alignment
             ws.cell(row=row, column=4, value="—").alignment = wrap_alignment
@@ -169,26 +175,53 @@ if mode == "Enter SPRLL Numbers manually":
     if sprll_numbers:
         st.caption(f"Will analyze: {', '.join(sprll_numbers)}")
 else:
+    with st.spinner("Loading disciplines & products from Jira…"):
+        disc_prod_map = load_discipline_product_map()
+
+    available_disciplines = sorted(disc_prod_map.keys()) if disc_prod_map else []
+
     c1, c2, c3 = st.columns(3)
     with c1:
         from_date = st.date_input("From Date", value=date(date.today().year, 1, 1))
     with c2:
         to_date = st.date_input("To Date", value=date.today())
     with c3:
-        discipline = st.selectbox("Discipline", DISCIPLINES)
+        discipline = st.selectbox(
+            "Discipline",
+            options=available_disciplines,
+            help="Disciplines are loaded live from Jira.",
+        )
 
-    jql = " AND ".join(
-        [
-            "project = SPRLL",
-            "issuetype = Process",
-            "status in (Resolved, Closed)",
-            f'"Discipline" = "{discipline}"',
-            f'created >= "{from_date}"',
-            f'created <= "{to_date}"',
-        ]
+    available_products = disc_prod_map.get(discipline, []) if discipline else []
+
+    selected_products = st.multiselect(
+        "Product (optional)",
+        options=available_products,
+        placeholder="Select one or more products…" if available_products else "No products for this discipline",
+        help="Products are filtered by the selected discipline, loaded live from Jira.",
     )
+
+    # Build JQL: combine Discipline and Product with OR when products are selected
+    disc_clause = f'type in (Process, "Lesson Learned") AND Discipline = "{discipline}"'
+    date_filter = f'created >= "{from_date}" AND created <= "{to_date}"'
+    status_filter = "status in (Resolved, Closed)"
+
+    if selected_products:
+        prod_list = ", ".join(f'"{p}"' for p in selected_products)
+        prod_clause = f'type in (Process, "Lesson Learned") AND "Product Selection" in ({prod_list})'
+        default_jql = (
+            f"project = SPRLL AND "
+            f"({disc_clause} OR {prod_clause}) AND "
+            f"{status_filter} AND {date_filter}"
+        )
+    else:
+        default_jql = (
+            f"project = SPRLL AND {disc_clause} AND "
+            f"{status_filter} AND {date_filter}"
+        )
+
     with st.expander("JQL Query Preview", expanded=True):
-        st.code(jql, language="sql")
+        jql = st.text_area("Edit the JQL query if needed:", value=default_jql, height=100)
 
 st.divider()
 
@@ -202,6 +235,8 @@ if analyze_clicked:
         from_date=locals().get("from_date"),
         to_date=locals().get("to_date"),
         discipline=locals().get("discipline"),
+        products=locals().get("selected_products"),
+        custom_jql=locals().get("jql"),
     )
 
     try:
@@ -318,7 +353,6 @@ if analyze_clicked:
                     if gen_summary:
                         st.markdown("---")
                         st.markdown("**🤖 AI-Generated Summary:**")
-                        # Try to parse JSON summary for structured display
                         try:
                             summary_json = json.loads(gen_summary)
                             if isinstance(summary_json, dict):
@@ -336,9 +370,9 @@ if analyze_clicked:
                                     st.markdown("**Evidence:**")
                                     if isinstance(summary_json["evidence"], list):
                                         for ev in summary_json["evidence"]:
-                                            st.markdown(f"- {ev}")
+                                            st.markdown(f"- _{ev}_")
                                     else:
-                                        st.markdown(str(summary_json["evidence"]))
+                                        st.markdown(f"_{summary_json['evidence']}_")
                                 if "confidence" in summary_json:
                                     st.markdown(f"**Confidence:** {summary_json['confidence']}")
                                 if "process_relevance" in summary_json:
@@ -360,28 +394,27 @@ if analyze_clicked:
             title = gap.get("title", "Untitled")
             st.markdown(f"**{num}. {title}**")
 
-            # Process area
             if gap.get("process_area"):
                 st.markdown(f"**Process Area:** {gap['process_area']}")
 
-            # Description (Option 1) or gap_description (Option 2)
+            if gap.get("phase"):
+                st.markdown(f"**SDLC Phase:** `{gap['phase']}`")
+
             desc = gap.get("description") or gap.get("gap_description", "")
             if desc:
                 st.markdown(f"> {desc}")
 
-            # Evidence
             if gap.get("evidence"):
                 st.markdown(f"**Evidence:** _{gap['evidence']}_")
 
-            # Recommended fix
             if gap.get("recommended_fix"):
                 st.markdown(f"**Recommended Fix:** {gap['recommended_fix']}")
 
-            # Related SPRLLs
             if gap.get("related_sprll"):
-                sprll_list = ", ".join(gap["related_sprll"])
-                st.markdown(f"**🔗 Related SPRLL(s) ({len(gap['related_sprll'])}):** `{sprll_list}`")
-                
+                related = gap["related_sprll"]
+                keys = [e.get("key", "") if isinstance(e, dict) else e for e in related]
+                st.markdown(f"**🔗 Related SPRLL(s) : ({len(related)})**")
+                st.markdown(f"{', '.join(f'`{k}`' for k in keys if k)}")
 
             st.write("")
 

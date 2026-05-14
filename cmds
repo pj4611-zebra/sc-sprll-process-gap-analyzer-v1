@@ -1,10 +1,5 @@
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 uvicorn backend.main:app --reload
 streamlit run app.py
-
-# Most recuring gap monthly 
-# Most number of repeated gaps - Graphs
-# Prompts for assignee comments and system -- Done
-# Cache for MongoDB -- Done
-# Missing fields - only present in DB and to show it in the UI
-# For each of the gaps given , assign the SPRLL responsible
-# Mail thing

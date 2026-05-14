@@ -5,9 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .services import (
+    fetch_discipline_product_map,
     fetch_issues_parallel,
     generate_process_gaps,
     search_sprll_numbers,
+    search_sprll_numbers_by_jql,
     sync_assignee_comments,
 )
 
@@ -27,6 +29,7 @@ class AnalyzeRequest(BaseModel):
     from_date: Optional[str] = None
     to_date: Optional[str] = None
     discipline: Optional[str] = None
+    custom_jql: Optional[str] = None
     prompt_option: int = Field(default=1, ge=1, le=2)
 
 
@@ -41,6 +44,8 @@ class CommentSyncRequest(BaseModel):
 def resolve_sprll_numbers(payload) -> List[str]:
     if payload.sprll_numbers:
         return payload.sprll_numbers
+    if getattr(payload, "custom_jql", None):
+        return search_sprll_numbers_by_jql(payload.custom_jql)
     if payload.from_date and payload.to_date and payload.discipline:
         return search_sprll_numbers(
             payload.from_date, payload.to_date, payload.discipline
@@ -54,6 +59,16 @@ def resolve_sprll_numbers(payload) -> List[str]:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/discipline-products")
+def get_discipline_products():
+    """Return a mapping of {discipline: [products]} built live from Jira."""
+    try:
+        mapping = fetch_discipline_product_map()
+        return {"discipline_products": mapping}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/analyze")
