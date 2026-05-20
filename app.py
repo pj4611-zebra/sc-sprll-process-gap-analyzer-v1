@@ -397,8 +397,9 @@ if analyze_clicked:
             if gap.get("process_area"):
                 st.markdown(f"**Process Area:** {gap['process_area']}")
 
-            if gap.get("phase"):
-                st.markdown(f"**SDLC Phase:** `{gap['phase']}`")
+            lifecycle_phase = gap.get("lifecycle_phase") or gap.get("phase")
+            if lifecycle_phase:
+                st.markdown(f"**Lifecycle Phase:** `{lifecycle_phase}`")
 
             desc = gap.get("description") or gap.get("gap_description", "")
             if desc:
@@ -415,6 +416,27 @@ if analyze_clicked:
                 keys = [e.get("key", "") if isinstance(e, dict) else e for e in related]
                 st.markdown(f"**🔗 Related SPRLL(s) : ({len(related)})**")
                 st.markdown(f"{', '.join(f'`{k}`' for k in keys if k)}")
+
+            validation = gap.get("validation")
+            if validation:
+                v_result = validation.get("validation_result", "")
+                v_score = validation.get("validation_score", "")
+                v_color = {"Valid": "🟢", "Partially Valid": "🟡", "Invalid": "🔴"}.get(v_result, "⚪")
+                with st.expander(f"{v_color} LLM Judge Score: {v_result} (Score: {v_score}/5)"):
+                    if validation.get("assigned_persona"):
+                        st.markdown(f"**Persona:** {validation['assigned_persona']}")
+                    if validation.get("reason"):
+                        st.markdown(f"**Reason:** {validation['reason']}")
+                    issues = validation.get("identified_issues") or []
+                    if issues:
+                        st.markdown("**Identified Issues:**")
+                        for issue in issues:
+                            st.markdown(f"- {issue}")
+                    improved = validation.get("improved_recommendation", "")
+                    if improved:
+                        st.markdown(f"**Improved Recommendation:** {improved}")
+                    if validation.get("confidence"):
+                        st.markdown(f"**Confidence:** `{validation['confidence']}`")
 
             st.write("")
 

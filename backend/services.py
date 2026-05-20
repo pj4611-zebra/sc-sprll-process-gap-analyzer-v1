@@ -181,7 +181,6 @@ PROCESS_GAP_PROMPT_1 = """
 You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
 
 You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
-​
 
 Additional Context:
 Each SPRLL may contain:
@@ -195,38 +194,43 @@ These fields indicate:
 Your mission:
 1. Analyze all SPRLL records together.
 2. Identify the 5 most critical underlying process gaps that allowed issues to escape internal controls and reach the customer.
-3. Classify each identified process gap into exactly ONE SDLC phase:
-   - Coding Phase
-   - Test Phase
-   - Requirement Phase
-   - Design Review Phase
-   - Deployment Phase
+3. Classify each identified process gap into exactly ONE lifecycle phase.
+
+Allowed Lifecycle Phases:
+- Coding Phase
+- Test Phase
+- Requirement Phase
+- Design Review Phase
+- Deployment Phase
+- Documentation Phase
 
 Definition of Process Gap:
 A process gap is a specific missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle that, if properly implemented, would have prevented the issue or detected it before customer impact.
 
-SDLC Phase Classification Objective:
-Determine the EARLIEST reasonable SDLC phase where the issue should ideally have been prevented or detected before reaching the customer.
-
-Core Interpretation Logic:
-- LL Type-Primary represents the escape category.
-- LL Type-Secondary represents the underlying contributing cause.
+Lifecycle Phase Classification Objective:
+Determine the EARLIEST reasonable lifecycle phase where the issue should ideally have been prevented or detected before reaching the customer.
 
 MANDATORY PHASE MAPPING RULES:
+The following mappings ALWAYS override general lifecycle inference rules whenever applicable:
+
 1. Config Error → Coding Phase
-2. Invalid Issue → Test Phase
+2. Invalid Issues → Test Phase
 3. Third Party → Deployment Phase
 4. Deployment → Deployment Phase
 5. Code Error → Test Phase
 6. Requirements → Requirement Phase
+7. Training and User Documentation → Documentation Phase
 
-If explicit mappings above are available, ALWAYS prioritize them.
+Core Interpretation Logic:
+- LL Type-Primary represents the escape category.
+- LL Type-Secondary represents the underlying contributing/root cause.
+- Mandatory phase mapping rules take highest priority whenever applicable.
 
 Example:
 LL Type-Primary = "Test Escape"
 LL Type-Secondary = "Code Error"
-→ SDLC Phase = "Test Phase"
-because the defect escaped during testing before release.
+→ Lifecycle Phase = "Test Phase"
+because Code Error is mandatorily mapped to Test Phase.
 
 PHASE CLASSIFICATION GUIDANCE:
 
@@ -236,8 +240,8 @@ Coding Phase:
 - Incorrect implementation
 - Missed validations
 - Security coding flaws
-- Incorrect fixes or code changes
 - Configuration implementation issues
+- Incorrect fixes or code changes
 
 Test Phase:
 - Test escape
@@ -248,8 +252,8 @@ Test Phase:
 - Performance/security testing gaps
 - Environment/configuration testing misses
 - Incomplete test scenarios
-- Invalid issue validation misses
-- Code error escape during testing
+- Invalid issue detection failures
+- Code errors escaping testing
 
 Requirement Phase:
 - Requirement ambiguity
@@ -270,11 +274,18 @@ Design Review Phase:
 - Incorrect orchestration between components
 
 Deployment Phase:
-- Third-party dependency issues
-- Deployment failures
+- Third-party integration failures
+- Deployment issues
 - Environment deployment mismatches
-- Release packaging/configuration problems
-- Production deployment validation gaps
+- Infrastructure/configuration deployment gaps
+- Release rollout failures
+
+Documentation Phase:
+- Training gaps
+- User documentation issues
+- Missing setup/configuration instructions
+- Incorrect documentation guidance
+- User enablement failures
 
 MANDATORY RULES:
 1. Use only facts explicitly present in the input.
@@ -297,15 +308,24 @@ MANDATORY RULES:
    - release criterion
    - training control
 6. Each gap must be unique, non-overlapping, and not a reworded duplicate.
-7. Prefer systemic gaps that explain multiple issues over isolated one-off observations.
-8. Prioritize gaps with the highest business value if fixed.
-9. Be concise, specific, practical, and executive-friendly.
-10. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
-11. Every identified process gap MUST be classified into exactly ONE SDLC phase.
-12. If multiple phases seem possible, choose the EARLIEST preventable phase.
-13. Use LL Type-Primary and LL Type-Secondary as primary classification signals whenever available.
-14. If LL fields are missing or unclear, infer the SDLC phase using SPRLL evidence and best-supported engineering judgment only.
-15. Before finalizing, merge semantically overlapping gaps into a single stronger gap.
+7. Before finalizing, merge semantically overlapping gaps into a single stronger gap.
+8. Do not weaken precision merely to maximize thematic diversity.
+9. Prefer systemic gaps that explain multiple issues over isolated one-off observations.
+10. Prioritize gaps with the highest business value if fixed.
+11. Be concise, specific, practical, and executive-friendly.
+12. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
+13. Every identified process gap MUST be classified into exactly ONE lifecycle phase.
+14. If multiple phases seem possible, choose the EARLIEST preventable phase unless overridden by mandatory phase mappings.
+15. Use LL Type-Primary and LL Type-Secondary as primary classification signals whenever available.
+16. If LL fields are missing or unclear, infer the lifecycle phase using SPRLL evidence and best-supported engineering judgment only.
+17. Confidence must reflect the strength, clarity, and directness of supporting evidence.
+
+DECISION PRIORITY ORDER:
+1. Mandatory phase mapping rules
+2. Explicit LL Type-Primary and LL Type-Secondary mapping
+3. RCA category meaning and issue classification
+4. SPRLL textual evidence
+5. Best-supported engineering judgment
 
 IMPACT PRIORITIZATION (use for ranking):
 Sort highest to lowest using these factors:
@@ -347,7 +367,7 @@ JSON Schema:
   {{
     "number": 1,
     "title": "Short specific gap title (max 10 words)",
-    "phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase",
+    "lifecycle_phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase | Documentation Phase",
     "process_area": "Exact affected lifecycle stage, gate, checklist, review, artifact, or control",
     "description": "Precise description of what control was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control must now be added or strengthened.",
     "evidence": "Short quote or concise paraphrase from the input directly supporting this gap",
@@ -356,7 +376,7 @@ JSON Schema:
     "related_sprll": [
       {{
         "key": "SPRLL-XXXX",
-        "phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase"
+        "lifecycle_phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase | Documentation Phase"
       }}
     ]
   }}
@@ -364,11 +384,156 @@ JSON Schema:
 
 RELATED SPRLL RULES:
 - "related_sprll" MUST list every SPRLL key from the input whose evidence contributed to this gap.
-- For each entry, "phase" is the SDLC phase inferred for THAT specific SPRLL record (may differ from the overall gap phase if multiple phases are represented).
+- For each entry, "lifecycle_phase" is the lifecycle phase inferred for THAT specific SPRLL record (may differ from the overall gap lifecycle_phase if multiple phases are represented).
 - Use only SPRLL keys explicitly present in the input.
 
 Context:
 {combined_descriptions}
+""".strip()
+
+
+# --- OPTION 1: Process Gap Validation prompt (LLM-as-a-Judge) ---
+PROCESS_GAP_VALIDATION_PROMPT = """
+You are a phase-specific engineering governance validator (Judge).
+
+Your role is to dynamically assume the correct expert persona based on the Lifecycle Phase provided in the input and critically validate whether the recommended fix is truly actionable, technically sound, preventive, and operationally implementable.
+
+PERSONA ASSIGNMENT RULES:
+
+If Lifecycle Phase = "Requirement Phase"
+Act as: "You are an expert Product Owner and Product Manager specializing in requirement governance, business rule validation, acceptance criteria definition, and scope management."
+
+If Lifecycle Phase = "Design Review Phase"
+Act as: "You are an expert System Architect specializing in architecture governance, Software Design Reviewer, integration design, dependency validation, workflow orchestration, and scalability reviews."
+
+If Lifecycle Phase = "Coding Phase"
+Act as: "You are an expert Software Developer specializing in secure coding practices, peer reviews, implementation quality, static analysis, regression prevention, and coding standards."
+
+If Lifecycle Phase = "Test Phase"
+Act as: "You are an expert Test Engineer specializing in regression testing, automation coverage, edge-case validation, unit testing, integration testing, and defect escape prevention."
+
+If Lifecycle Phase = "Documentation Phase"
+Act as: "You are an expert Technical Writer specializing in user documentation quality, configuration guidance, training enablement, and release documentation governance."
+
+If Lifecycle Phase = "Deployment Phase"
+Act as: "You are an expert DevOps Engineer and Release Manager specializing in deployment governance, environment validation, release controls, infrastructure consistency, and rollout verification."
+
+VALIDATION OBJECTIVE:
+Determine whether the recommended fix:
+- directly addresses the identified process gap
+- aligns with the assigned lifecycle phase
+- is preventive rather than reactive
+- is operationally executable and implementable
+- is measurable and enforceable
+- can realistically reduce recurrence risk
+
+PHASE-SPECIFIC VALIDATION EXPECTATIONS:
+
+Requirement Phase:
+Validate whether the recommendation:
+- improves requirement clarity
+- strengthens business rule definition
+- improves acceptance criteria
+- strengthens requirement review/signoff controls
+- reduces ambiguity or scope gaps
+- improves feature parity validation
+
+Design Review Phase:
+Validate whether the recommendation:
+- strengthens architecture/design governance
+- improves dependency/interface validation
+- addresses integration/scalability risks
+- improves workflow/system orchestration
+- introduces meaningful design review controls
+
+Coding Phase:
+Validate whether the recommendation:
+- improves peer review rigor
+- strengthens coding standards
+- introduces code validation controls
+- improves static analysis/security checks
+- prevents regression introduction
+- improves implementation quality
+
+Test Phase:
+Validate whether the recommendation:
+- improves regression coverage
+- strengthens negative/edge-case testing
+- improves automation coverage
+- strengthens execution discipline
+- reduces test escape risk
+- improves unit/integration testing effectiveness
+
+Documentation Phase:
+Validate whether the recommendation:
+- improves documentation accuracy
+- strengthens setup/configuration guidance
+- improves release documentation quality
+- improves training/user enablement
+- reduces documentation ambiguity
+
+Deployment Phase:
+Validate whether the recommendation:
+- strengthens deployment validation
+- improves release governance
+- reduces environment inconsistencies
+- improves rollout verification
+- strengthens third-party dependency handling
+- introduces deployment safeguards/checklists
+
+STRICT VALIDATION RULES:
+1. Use only the information explicitly present in the input.
+2. Do NOT assume missing information.
+3. Reject vague or generic recommendations such as:
+   - Improve testing
+   - Improve communication
+   - Follow best practices
+   - Increase awareness
+4. A valid recommendation MUST:
+   - identify a concrete control or action
+   - specify exactly where in the lifecycle/process it should be implemented
+   - be operationally executable
+   - be measurable or enforceable
+   - directly address the identified process gap
+   - align with the assigned lifecycle phase/persona
+5. The recommendation must be preventive, not merely reactive.
+6. The recommendation must reduce recurrence risk.
+7. Flag recommendations that are vague, ambiguous, too broad, non-measurable, or disconnected from the identified issue.
+8. Prefer recommendations involving mandatory validations, review gates, checklist enhancements, automation, approval workflows, monitoring, regression safeguards, deployment controls, or documentation enforcement.
+9. If the recommendation is weak or partially actionable, rewrite it into a stronger, implementation-ready recommendation.
+10. Be critical, precise, and governance-focused.
+11. Confidence must reflect the strength of evidence and recommendation quality.
+
+VALIDATION DECISION CRITERIA:
+Valid: Specific, Actionable, Preventive, Measurable, Phase-aligned, Implementable
+Partially Valid: Directionally correct but incomplete, vague, or weakly enforceable
+Invalid: Generic, Non-actionable, Reactive only, Ambiguous, Not aligned with the process gap or lifecycle phase
+
+OUTPUT INSTRUCTIONS:
+Return ONLY valid JSON.
+No markdown.
+No explanations outside JSON.
+
+JSON Schema:
+{{
+  "assigned_persona": "Exact persona assumed for validation",
+  "validation_result": "Valid | Partially Valid | Invalid",
+  "validation_score": 3,
+  "reason": "Concise explanation of why the recommendation is or is not actionable, measurable, preventive, and phase-appropriate. Score must be between 1 and 5.",
+  "identified_issues": [
+    "Specific weakness or concern in the recommendation"
+  ],
+  "improved_recommendation": "Refined implementation-ready recommendation if improvement is needed, otherwise repeat the original.",
+  "confidence": "High | Medium | Low"
+}}
+
+INPUT:
+Lifecycle Phase: {lifecycle_phase}
+Process Gap Title: {title}
+Process Area: {process_area}
+Process Gap Description: {description}
+Recommended Fix: {recommended_fix}
+Supporting Evidence: {evidence}
 """.strip()
 
 # --- Comment Summary prompts ---
@@ -551,6 +716,44 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
+def _validate_gap_with_vertex(gap: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the LLM-as-a-Judge validation for a single process gap."""
+    client = _get_genai_client()
+    s = get_settings()
+
+    lifecycle_phase = gap.get("lifecycle_phase") or gap.get("phase", "Unknown")
+    prompt = PROCESS_GAP_VALIDATION_PROMPT.format(
+        lifecycle_phase=lifecycle_phase,
+        title=gap.get("title", ""),
+        process_area=gap.get("process_area", ""),
+        description=gap.get("description", ""),
+        recommended_fix=gap.get("recommended_fix", ""),
+        evidence=gap.get("evidence", ""),
+    )
+
+    try:
+        resp = client.models.generate_content(
+            model=s.vertex_model,
+            contents=prompt,
+            config=GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=800,
+            ),
+        )
+        text = _strip_code_fences(resp.text or "{}")
+        return json.loads(text)
+    except Exception as e:
+        return {
+            "assigned_persona": "Unknown",
+            "validation_result": "Invalid",
+            "validation_score": 0,
+            "reason": f"Validation call failed: {type(e).__name__}: {e}",
+            "identified_issues": [],
+            "improved_recommendation": "",
+            "confidence": "Low",
+        }
+
+
 def generate_process_gaps(
     combined_descriptions: str, prompt_option: int = 1
 ) -> List[Dict[str, Any]]:
@@ -566,7 +769,7 @@ def generate_process_gaps(
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.0,
-                max_output_tokens=2000,
+                max_output_tokens=2500,
             ),
         )
         text = _strip_code_fences(resp.text or "[]")
@@ -577,6 +780,7 @@ def generate_process_gaps(
                 {
                     "number": len(gaps) + 1,
                     "title": f"Quality Gate {len(gaps) + 1}",
+                    "lifecycle_phase": "Test Phase",
                     "process_area": "N/A",
                     "description": "Insufficient evidence to identify additional gap.",
                     "evidence": "N/A",
@@ -584,17 +788,40 @@ def generate_process_gaps(
                     "related_sprll": [],
                 }
             )
-        return gaps[:5]
+        gaps = gaps[:5]
     except Exception as e:
-        return [
+        gaps = [
             {
                 "number": i + 1,
                 "title": f"Process Gap {i + 1}",
+                "lifecycle_phase": "Test Phase",
                 "description": f"AI generation failed: {type(e).__name__}: {e}",
                 "related_sprll": [],
             }
             for i in range(5)
         ]
+
+    # Run LLM-as-a-Judge validation for each gap in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_map = {
+            executor.submit(_validate_gap_with_vertex, gap): i
+            for i, gap in enumerate(gaps)
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            i = future_map[future]
+            try:
+                gaps[i]["validation"] = future.result()
+            except Exception as e:
+                gaps[i]["validation"] = {
+                    "validation_result": "Invalid",
+                    "validation_score": 0,
+                    "reason": f"Validation error: {e}",
+                    "identified_issues": [],
+                    "improved_recommendation": "",
+                    "confidence": "Low",
+                }
+
+    return gaps
 
 
 # =========================
