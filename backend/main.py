@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field
 from .services import (
     fetch_discipline_product_map,
     fetch_issues_parallel,
+    find_repeated_gaps_in_phase,
     generate_process_gaps,
+    save_gaps_to_phase_collections,
     search_sprll_numbers,
     search_sprll_numbers_by_jql,
     sync_assignee_comments,
@@ -87,12 +89,51 @@ def analyze(payload: AnalyzeRequest):
         else "No descriptions available."
     )
 
+    process_gaps = generate_process_gaps(combined, prompt_option=prompt_option)
+
+    persistence = save_gaps_to_phase_collections(
+        process_gaps,
+        source_sprll_keys=sprll_numbers,
+        sprll_date_range={"from": payload.from_date, "to": payload.to_date},
+    )
+
     return {
         "sprll_numbers": sprll_numbers,
         "issues": issues,
-        "process_gaps": generate_process_gaps(combined, prompt_option=prompt_option),
+        "process_gaps": process_gaps,
         "prompt_option": prompt_option,
+        "persistence": persistence,
     }
+
+
+class RepeatedGapsRequest(BaseModel):
+    lifecycle_phase: str
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+    similarity_threshold: Optional[float] = None
+    min_cluster_size: int = Field(default=2, ge=2)
+
+
+@app.post("/api/repeated-gaps")
+def repeated_gaps(payload: RepeatedGapsRequest):
+    """Return clusters of semantically-similar gaps in a phase within a date window."""
+    try:
+        clusters = find_repeated_gaps_in_phase(
+            lifecycle_phase=payload.lifecycle_phase,
+            from_date=payload.from_date,
+            to_date=payload.to_date,
+            similarity_threshold=payload.similarity_threshold,
+            min_cluster_size=payload.min_cluster_size,
+        )
+        return {
+            "lifecycle_phase": payload.lifecycle_phase,
+            "from_date": payload.from_date,
+            "to_date": payload.to_date,
+            "cluster_count": len(clusters),
+            "clusters": clusters,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/comments/sync")

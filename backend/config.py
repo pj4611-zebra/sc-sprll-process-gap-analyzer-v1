@@ -13,7 +13,11 @@ class Settings(BaseSettings):
     gcp_project: str
     gcp_location: str = "us-central1"
     vertex_model: str = "gemini-2.5-flash-lite"
+    embedding_model: str = "text-embedding-004"
     google_application_credentials: str
+
+    # Phase-gap recurrence detection
+    similarity_threshold_default: float = 0.85
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -25,3 +29,14 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# Map each LLM-emitted lifecycle_phase value to its dedicated MongoDB collection.
+PHASE_TO_COLLECTION: dict[str, str] = {
+    "Coding Phase": "gaps_coding_phase",
+    "Test Phase": "gaps_test_phase",
+    "Requirement Phase": "gaps_requirement_phase",
+    "Design Review Phase": "gaps_design_review_phase",
+    "Deployment Phase": "gaps_deployment_phase",
+    "Documentation Phase": "gaps_documentation_phase",
+}

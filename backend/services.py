@@ -2,17 +2,19 @@ import concurrent.futures
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import requests as req_lib
 from google import genai  # type: ignore
-from google.genai.types import GenerateContentConfig  # type: ignore
-from pymongo import MongoClient
+from google.genai.types import EmbedContentConfig, GenerateContentConfig  # type: ignore
+from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import PyMongoError
 
-from .config import get_settings
+from .config import PHASE_TO_COLLECTION, get_settings
 
 
 # =========================
@@ -918,6 +920,276 @@ def _load_from_mongodb(key: str) -> Optional[Dict[str, Any]]:
     except PyMongoError as ex:
         print(f"[ERROR] MongoDB read failed for {key}: {ex}")
         return None
+
+
+# =========================
+# Phase-organized gap storage
+# =========================
+def _get_phase_gap_collection(lifecycle_phase: str):
+    """Return the MongoDB collection that owns gaps for a given lifecycle phase, or None."""
+    collection_name = PHASE_TO_COLLECTION.get(lifecycle_phase)
+    if not collection_name:
+        return None
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return None
+    return client[s.mongodb_db_name][collection_name]
+
+
+def _ensure_phase_indexes() -> None:
+    """Create the time-window + lookup indexes on each phase collection (idempotent)."""
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return
+    db = client[s.mongodb_db_name]
+    for collection_name in PHASE_TO_COLLECTION.values():
+        try:
+            coll = db[collection_name]
+            coll.create_index([("created_at", DESCENDING)])
+            coll.create_index([("analysis_run_id", ASCENDING)])
+            coll.create_index([("validation.validation_score", DESCENDING)])
+        except PyMongoError as ex:
+            print(f"[WARN] Could not create indexes on {collection_name}: {ex}")
+
+
+def compute_embedding(text: str) -> Optional[List[float]]:
+    """Embed text with Vertex AI for semantic similarity. Returns None on failure."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    client = _get_genai_client()
+    s = get_settings()
+    try:
+        resp = client.models.embed_content(
+            model=s.embedding_model,
+            contents=[text],
+            config=EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
+        )
+        embeddings = getattr(resp, "embeddings", None) or []
+        if not embeddings:
+            return None
+        values = getattr(embeddings[0], "values", None)
+        return list(values) if values else None
+    except Exception as ex:
+        print(f"[ERROR] Embedding call failed: {type(ex).__name__}: {ex}")
+        return None
+
+
+def _build_embedding_text(gap: Dict[str, Any]) -> str:
+    parts = [
+        gap.get("title", ""),
+        gap.get("description", ""),
+        gap.get("recommended_fix", ""),
+    ]
+    return "\n".join(p for p in parts if p).strip()
+
+
+def save_gaps_to_phase_collections(
+    gaps: List[Dict[str, Any]],
+    source_sprll_keys: List[str],
+    sprll_date_range: Optional[Dict[str, Optional[str]]] = None,
+) -> Dict[str, Any]:
+    """Persist each LLM-generated gap into the MongoDB collection for its lifecycle phase.
+
+    Returns a small summary the caller can attach to the API response so the UI
+    can confirm persistence happened. Failures are logged, not raised — saving
+    must never break the analyze pipeline.
+    """
+    summary: Dict[str, Any] = {
+        "analysis_run_id": str(uuid.uuid4()),
+        "inserted": 0,
+        "skipped": 0,
+        "per_phase": {},
+    }
+
+    _ensure_phase_indexes()
+    now = datetime.now(timezone.utc)
+
+    for gap in gaps:
+        lifecycle_phase = gap.get("lifecycle_phase") or gap.get("phase")
+        coll = _get_phase_gap_collection(lifecycle_phase) if lifecycle_phase else None
+        if coll is None:
+            print(
+                f"[WARN] Skipping gap #{gap.get('number')} — unknown lifecycle_phase "
+                f"'{lifecycle_phase}'"
+            )
+            summary["skipped"] += 1
+            continue
+
+        embedding_text = _build_embedding_text(gap)
+        embedding = compute_embedding(embedding_text)
+
+        document = {
+            "analysis_run_id": summary["analysis_run_id"],
+            "gap_number": gap.get("number"),
+            "title": gap.get("title", ""),
+            "lifecycle_phase": lifecycle_phase,
+            "process_area": gap.get("process_area", ""),
+            "description": gap.get("description", ""),
+            "evidence": gap.get("evidence", ""),
+            "recommended_fix": gap.get("recommended_fix", ""),
+            "confidence": gap.get("confidence", ""),
+            "related_sprlls": gap.get("related_sprll", []),
+            "validation": gap.get("validation", {}),
+            "embedding_text": embedding_text,
+            "embedding": embedding,
+            "embedding_model": get_settings().embedding_model if embedding else None,
+            "source_sprll_keys": list(source_sprll_keys),
+            "sprll_date_range": sprll_date_range or {"from": None, "to": None},
+            "created_at": now,
+        }
+
+        try:
+            coll.insert_one(document)
+            summary["inserted"] += 1
+            summary["per_phase"][lifecycle_phase] = (
+                summary["per_phase"].get(lifecycle_phase, 0) + 1
+            )
+        except PyMongoError as ex:
+            print(f"[ERROR] Failed to insert gap into {coll.name}: {ex}")
+            summary["skipped"] += 1
+
+    print(
+        f"[INFO] Phase-gap save: run={summary['analysis_run_id']} "
+        f"inserted={summary['inserted']} skipped={summary['skipped']}"
+    )
+    return summary
+
+
+# =========================
+# Time-window recurrence detection
+# =========================
+def _cosine_similarity_matrix(vectors: "np.ndarray") -> "np.ndarray":
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    normed = vectors / norms
+    return normed @ normed.T
+
+
+class _UnionFind:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def _parse_iso_date(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def find_repeated_gaps_in_phase(
+    lifecycle_phase: str,
+    from_date: Any = None,
+    to_date: Any = None,
+    similarity_threshold: Optional[float] = None,
+    min_cluster_size: int = 2,
+) -> List[Dict[str, Any]]:
+    """Find clusters of semantically-similar gaps in a phase collection within a date window.
+
+    Each cluster represents a recurring fault. Result is sorted by cluster size descending.
+    """
+    coll = _get_phase_gap_collection(lifecycle_phase)
+    if coll is None:
+        return []
+
+    s = get_settings()
+    threshold = (
+        similarity_threshold
+        if similarity_threshold is not None
+        else s.similarity_threshold_default
+    )
+
+    query: Dict[str, Any] = {"embedding": {"$ne": None}}
+    date_filter: Dict[str, datetime] = {}
+    fdt = _parse_iso_date(from_date)
+    tdt = _parse_iso_date(to_date)
+    if fdt:
+        date_filter["$gte"] = fdt
+    if tdt:
+        date_filter["$lte"] = tdt
+    if date_filter:
+        query["created_at"] = date_filter
+
+    docs = list(coll.find(query))
+    if len(docs) < min_cluster_size:
+        return []
+
+    vectors = np.array([d["embedding"] for d in docs], dtype=float)
+    sim = _cosine_similarity_matrix(vectors)
+
+    n = len(docs)
+    uf = _UnionFind(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if sim[i, j] >= threshold:
+                uf.union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        groups.setdefault(uf.find(i), []).append(i)
+
+    clusters: List[Dict[str, Any]] = []
+    for members in groups.values():
+        if len(members) < min_cluster_size:
+            continue
+
+        def score(idx: int) -> int:
+            return int(
+                (docs[idx].get("validation") or {}).get("validation_score") or 0
+            )
+
+        rep_idx = max(members, key=score)
+        rep = docs[rep_idx]
+
+        related: set = set()
+        run_ids: set = set()
+        for idx in members:
+            for key in docs[idx].get("source_sprll_keys") or []:
+                related.add(key)
+            run_id = docs[idx].get("analysis_run_id")
+            if run_id:
+                run_ids.add(run_id)
+
+        clusters.append(
+            {
+                "size": len(members),
+                "representative": {
+                    "_id": str(rep.get("_id")),
+                    "title": rep.get("title"),
+                    "description": rep.get("description"),
+                    "recommended_fix": rep.get("recommended_fix"),
+                    "lifecycle_phase": rep.get("lifecycle_phase"),
+                    "validation_score": (rep.get("validation") or {}).get(
+                        "validation_score"
+                    ),
+                },
+                "member_ids": [str(docs[i].get("_id")) for i in members],
+                "source_sprll_keys": sorted(related),
+                "analysis_run_ids": sorted(run_ids),
+            }
+        )
+
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    return clusters
 
 
 # =========================
