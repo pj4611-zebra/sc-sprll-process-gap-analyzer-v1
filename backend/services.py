@@ -135,6 +135,25 @@ def _extract_discipline(fields: Dict[str, Any]) -> str:
     return str(discipline_raw) if discipline_raw else ""
 
 
+def _extract_product(fields: Dict[str, Any]) -> str:
+    """Extract the Product Selection value (customfield_21800), handling cascading child fields."""
+    product_val = fields.get("customfield_21800")
+    if isinstance(product_val, dict):
+        child = product_val.get("child")
+        if child and isinstance(child, dict):
+            return child.get("value") or child.get("name") or ""
+        return product_val.get("value") or product_val.get("name") or ""
+    if isinstance(product_val, list):
+        vals = []
+        for item in product_val:
+            if isinstance(item, dict):
+                vals.append(item.get("value") or item.get("name") or "")
+            else:
+                vals.append(str(item))
+        return ", ".join(v for v in vals if v)
+    return str(product_val) if product_val else ""
+
+
 def _extract_assignee_name(fields: Dict[str, Any]) -> str:
     assignee = fields.get("assignee") or {}
     return assignee.get("name") or assignee.get("displayName") or ""
@@ -180,7 +199,7 @@ def _get_genai_client() -> genai.Client:
 
 # --- OPTION 1: Process Gap prompts ---
 PROCESS_GAP_PROMPT_1 = """
-You are a Senior Quality Engineering Process Gap Analyst with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
+You are a Senior Quality Assurance Engineer with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
 
 You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
 
@@ -195,8 +214,8 @@ These fields indicate:
 
 Your mission:
 1. Analyze all SPRLL records together.
-2. Identify the 5 most critical underlying process gaps that allowed issues to escape internal controls and reach the customer.
-3. Classify each identified process gap into exactly ONE lifecycle phase.
+2. Produce the 5 most critical, forward-looking ACTION ITEMS that a QA Engineer should drive BEFORE the upcoming releases so that these past escapes do not recur. Each action item must close a specific missing, weak, skipped, or unenforced control that previously allowed an issue to reach the customer.
+3. Classify each action item into exactly ONE lifecycle phase (the phase where the QA team should act).
 
 Allowed Lifecycle Phases:
 - Coding Phase
@@ -206,11 +225,11 @@ Allowed Lifecycle Phases:
 - Deployment Phase
 - Documentation Phase
 
-Definition of Process Gap:
-A process gap is a specific missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle that, if properly implemented, would have prevented the issue or detected it before customer impact.
+Definition of an Action Item:
+An action item is a specific, forward-looking QA action that closes a missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle — a control that, if put in place before the upcoming releases, would have prevented the past issue or detected it before customer impact.
 
 Lifecycle Phase Classification Objective:
-Determine the EARLIEST reasonable lifecycle phase where the issue should ideally have been prevented or detected before reaching the customer.
+Determine the EARLIEST reasonable lifecycle phase where the QA team should act so the issue is prevented or detected before reaching the customer in upcoming releases.
 
 MANDATORY PHASE MAPPING RULES:
 The following mappings ALWAYS override general lifecycle inference rules whenever applicable:
@@ -368,12 +387,12 @@ JSON Schema:
 [
   {{
     "number": 1,
-    "title": "Short specific gap title (max 10 words)",
+    "title": "Short specific action-item title (max 10 words)",
     "lifecycle_phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase | Documentation Phase",
-    "process_area": "Exact affected lifecycle stage, gate, checklist, review, artifact, or control",
-    "description": "Precise description of what control was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control must now be added or strengthened.",
-    "evidence": "Short quote or concise paraphrase from the input directly supporting this gap",
-    "recommended_fix": "Concrete action that can be implemented immediately, including where in the process it should be added.",
+    "process_area": "Exact lifecycle stage, gate, checklist, review, artifact, or control the QA team must act on",
+    "description": "Precise description of the control that was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control the QA team must add or strengthen for the upcoming releases.",
+    "evidence": "Short quote or concise paraphrase from the input directly supporting this action item",
+    "recommended_fix": "Concrete action the QA team should take for the upcoming releases, implementable immediately, including where in the process it should be added.",
     "confidence": "High | Medium | Low",
     "related_sprll": [
       {{
@@ -385,8 +404,8 @@ JSON Schema:
 ]
 
 RELATED SPRLL RULES:
-- "related_sprll" MUST list every SPRLL key from the input whose evidence contributed to this gap.
-- For each entry, "lifecycle_phase" is the lifecycle phase inferred for THAT specific SPRLL record (may differ from the overall gap lifecycle_phase if multiple phases are represented).
+- "related_sprll" MUST list every SPRLL key from the input whose evidence contributed to this action item.
+- For each entry, "lifecycle_phase" is the lifecycle phase inferred for THAT specific SPRLL record (may differ from the overall action-item lifecycle_phase if multiple phases are represented).
 - Use only SPRLL keys explicitly present in the input.
 
 Context:
@@ -398,7 +417,7 @@ Context:
 PROCESS_GAP_VALIDATION_PROMPT = """
 You are a phase-specific engineering governance validator (Judge).
 
-Your role is to dynamically assume the correct expert persona based on the Lifecycle Phase provided in the input and critically validate whether the recommended fix is truly actionable, technically sound, preventive, and operationally implementable.
+Your role is to dynamically assume the correct expert persona based on the Lifecycle Phase provided in the input and critically validate whether the recommended action item is truly actionable for an upcoming release — technically sound, preventive, and operationally implementable by the QA team.
 
 PERSONA ASSIGNMENT RULES:
 
@@ -870,6 +889,7 @@ def _save_to_mongodb(
     missing_fields: List[str],
     ll_type_primary: str = "",
     ll_type_secondary: str = "",
+    product: str = "",
 ) -> bool:
     collection = _get_issue_collection()
     if collection is None:
@@ -882,6 +902,7 @@ def _save_to_mongodb(
             "summary": summary,
             "description": description,
             "customfield_12801": discipline,
+            "customfield_21800": product,
             "status": status,
             "assignee_name": assignee_name,
             "assignee_comments": assignee_comments,
@@ -990,6 +1011,8 @@ def save_gaps_to_phase_collections(
     gaps: List[Dict[str, Any]],
     source_sprll_keys: List[str],
     sprll_date_range: Optional[Dict[str, Optional[str]]] = None,
+    disciplines: Optional[List[str]] = None,
+    products: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Persist each LLM-generated gap into the MongoDB collection for its lifecycle phase.
 
@@ -1006,6 +1029,8 @@ def save_gaps_to_phase_collections(
 
     _ensure_phase_indexes()
     now = datetime.now(timezone.utc)
+    disciplines = sorted({d for d in (disciplines or []) if d})
+    products = sorted({p for p in (products or []) if p})
 
     for gap in gaps:
         lifecycle_phase = gap.get("lifecycle_phase") or gap.get("phase")
@@ -1037,6 +1062,8 @@ def save_gaps_to_phase_collections(
             "embedding": embedding,
             "embedding_model": get_settings().embedding_model if embedding else None,
             "source_sprll_keys": list(source_sprll_keys),
+            "disciplines": disciplines,
+            "products": products,
             "sprll_date_range": sprll_date_range or {"from": None, "to": None},
             "created_at": now,
         }
@@ -1193,6 +1220,266 @@ def find_repeated_gaps_in_phase(
 
 
 # =========================
+# Cross-phase gap insights (Panel 2 — Database view)
+# =========================
+def _cluster_gap_docs(
+    docs: List[Dict[str, Any]],
+    threshold: float,
+    min_cluster_size: int,
+) -> List[Dict[str, Any]]:
+    """Cluster embedded gap docs by cosine similarity and return ranked clusters."""
+    docs = [d for d in docs if d.get("embedding")]
+    if not docs:
+        return []
+
+    vectors = np.array([d["embedding"] for d in docs], dtype=float)
+    sim = _cosine_similarity_matrix(vectors)
+
+    n = len(docs)
+    uf = _UnionFind(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if sim[i, j] >= threshold:
+                uf.union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        groups.setdefault(uf.find(i), []).append(i)
+
+    clusters: List[Dict[str, Any]] = []
+    for members in groups.values():
+        if len(members) < min_cluster_size:
+            continue
+
+        def score(idx: int) -> int:
+            return int((docs[idx].get("validation") or {}).get("validation_score") or 0)
+
+        rep = docs[max(members, key=score)]
+
+        related: set = set()
+        disciplines: set = set()
+        products: set = set()
+        run_ids: set = set()
+        for idx in members:
+            for key in docs[idx].get("source_sprll_keys") or []:
+                related.add(key)
+            for d in docs[idx].get("disciplines") or []:
+                disciplines.add(d)
+            for p in docs[idx].get("products") or []:
+                products.add(p)
+            run_id = docs[idx].get("analysis_run_id")
+            if run_id:
+                run_ids.add(run_id)
+
+        clusters.append(
+            {
+                "size": len(members),
+                "representative": {
+                    "_id": str(rep.get("_id")),
+                    "title": rep.get("title"),
+                    "description": rep.get("description"),
+                    "recommended_fix": rep.get("recommended_fix"),
+                    "lifecycle_phase": rep.get("lifecycle_phase"),
+                    "validation_score": (rep.get("validation") or {}).get(
+                        "validation_score"
+                    ),
+                    "improved_recommendation": (rep.get("validation") or {}).get(
+                        "improved_recommendation"
+                    ),
+                },
+                "member_ids": [str(docs[i].get("_id")) for i in members],
+                "source_sprll_keys": sorted(related),
+                "disciplines": sorted(disciplines),
+                "products": sorted(products),
+                "analysis_run_ids": sorted(run_ids),
+            }
+        )
+
+    clusters.sort(key=lambda c: (c["size"], c["representative"].get("validation_score") or 0), reverse=True)
+    return clusters
+
+
+def get_gap_insights(
+    dimension: str,
+    value: Optional[str] = None,
+    from_date: Any = None,
+    to_date: Any = None,
+    similarity_threshold: Optional[float] = None,
+    min_cluster_size: int = 1,
+    top_n: int = 25,
+) -> List[Dict[str, Any]]:
+    """Return the most-repeated QA action items sliced by discipline / product / lifecycle phase.
+
+    dimension: "discipline" | "product" | "lifecycle_phase".
+    value: optional specific discipline/product/phase to filter on ("All" or None = no filter).
+    """
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return []
+    db = client[s.mongodb_db_name]
+    threshold = (
+        similarity_threshold
+        if similarity_threshold is not None
+        else s.similarity_threshold_default
+    )
+
+    query: Dict[str, Any] = {"embedding": {"$ne": None}}
+    date_filter: Dict[str, datetime] = {}
+    fdt = _parse_iso_date(from_date)
+    tdt = _parse_iso_date(to_date)
+    if fdt:
+        date_filter["$gte"] = fdt
+    if tdt:
+        date_filter["$lte"] = tdt
+    if date_filter:
+        query["created_at"] = date_filter
+
+    has_value = bool(value) and value != "All"
+    if dimension == "discipline" and has_value:
+        query["disciplines"] = value
+    elif dimension == "product" and has_value:
+        query["products"] = value
+
+    # Choose which phase collections to scan.
+    if dimension == "lifecycle_phase" and has_value:
+        coll_name = PHASE_TO_COLLECTION.get(value)
+        collection_names = [coll_name] if coll_name else []
+    else:
+        collection_names = list(PHASE_TO_COLLECTION.values())
+
+    docs: List[Dict[str, Any]] = []
+    for name in collection_names:
+        try:
+            docs.extend(list(db[name].find(query)))
+        except PyMongoError as ex:
+            print(f"[WARN] gap-insights read failed on {name}: {ex}")
+
+    clusters = _cluster_gap_docs(docs, threshold, min_cluster_size)
+    return clusters[:top_n]
+
+
+def get_gap_dimensions() -> Dict[str, List[str]]:
+    """Return the distinct disciplines, products, and phases present in the gap collections."""
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return {"disciplines": [], "products": [], "lifecycle_phases": []}
+    db = client[s.mongodb_db_name]
+
+    disciplines: set = set()
+    products: set = set()
+    phases: set = set()
+    for phase, name in PHASE_TO_COLLECTION.items():
+        try:
+            coll = db[name]
+            if coll.count_documents({}, limit=1):
+                phases.add(phase)
+            for d in coll.distinct("disciplines"):
+                if d:
+                    disciplines.add(d)
+            for p in coll.distinct("products"):
+                if p:
+                    products.add(p)
+        except PyMongoError as ex:
+            print(f"[WARN] gap-dimensions read failed on {name}: {ex}")
+
+    return {
+        "disciplines": sorted(disciplines),
+        "products": sorted(products),
+        "lifecycle_phases": sorted(phases),
+    }
+
+
+# =========================
+# Full-analysis result cache
+# =========================
+def _get_cache_collection():
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return None
+    return client[s.mongodb_db_name]["analysis_cache"]
+
+
+def analysis_signature(query_meta: Dict[str, Any]) -> str:
+    """Stable sha256 signature over the normalized query that produced an analysis."""
+    import hashlib
+
+    normalized = {
+        "sprll_numbers": sorted(query_meta.get("sprll_numbers") or []),
+        "discipline": query_meta.get("discipline") or "",
+        "products": sorted(query_meta.get("products") or []),
+        "from_date": query_meta.get("from_date") or "",
+        "to_date": query_meta.get("to_date") or "",
+        "custom_jql": (query_meta.get("custom_jql") or "").strip(),
+        "prompt_option": query_meta.get("prompt_option", 1),
+    }
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def load_cached_analysis(signature: str) -> Optional[Dict[str, Any]]:
+    coll = _get_cache_collection()
+    if coll is None:
+        return None
+    try:
+        doc = coll.find_one({"signature": signature})
+        return _strip_mongo_id(doc) if doc else None
+    except PyMongoError as ex:
+        print(f"[ERROR] analysis_cache read failed: {ex}")
+        return None
+
+
+def save_cached_analysis(
+    signature: str, query_meta: Dict[str, Any], response: Dict[str, Any]
+) -> bool:
+    coll = _get_cache_collection()
+    if coll is None:
+        return False
+    try:
+        coll.create_index("signature", unique=True)
+    except PyMongoError:
+        pass
+    try:
+        coll.update_one(
+            {"signature": signature},
+            {
+                "$set": {
+                    "signature": signature,
+                    "query_meta": query_meta,
+                    "response": response,
+                    "created_at": datetime.now(timezone.utc),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except PyMongoError as ex:
+        print(f"[ERROR] analysis_cache save failed: {ex}")
+        return False
+
+
+def delete_phase_gaps_by_run_id(run_id: str) -> int:
+    """Remove all persisted gaps for a given analysis_run_id (used on force re-run)."""
+    if not run_id:
+        return 0
+    s = get_settings()
+    client = _get_mongo_client()
+    if client is None:
+        return 0
+    db = client[s.mongodb_db_name]
+    deleted = 0
+    for name in PHASE_TO_COLLECTION.values():
+        try:
+            res = db[name].delete_many({"analysis_run_id": run_id})
+            deleted += res.deleted_count
+        except PyMongoError as ex:
+            print(f"[WARN] could not delete gaps for run {run_id} in {name}: {ex}")
+    return deleted
+
+
+# =========================
 # Jira search
 # =========================
 def search_sprll_numbers(from_date: str, to_date: str, discipline: str) -> List[str]:
@@ -1332,7 +1619,7 @@ def _fetch_and_process_issue(
             url,
             headers=_jira_headers(),
             params={
-                "fields": "summary,description,status,assignee,comment,customfield_12801,customfield_14501,customfield_14502"
+                "fields": "summary,description,status,assignee,comment,customfield_12801,customfield_14501,customfield_14502,customfield_21800"
             },
             timeout=30,
         )
@@ -1373,6 +1660,7 @@ def _fetch_and_process_issue(
     description_raw = fields.get("description")
     description = adf_to_text(description_raw).strip() if description_raw else ""
     discipline = _extract_discipline(fields)
+    product = _extract_product(fields)
     status_obj = fields.get("status") or {}
     status = (
         status_obj.get("name") if isinstance(status_obj, dict) else str(status_obj)
@@ -1404,6 +1692,7 @@ def _fetch_and_process_issue(
         missing_fields=missing_fields,
         ll_type_primary=ll_type_primary,
         ll_type_secondary=ll_type_secondary,
+        product=product,
     )
 
     return {
@@ -1411,6 +1700,7 @@ def _fetch_and_process_issue(
         "summary": summary,
         "description": description,
         "customfield_12801": discipline,
+        "customfield_21800": product,
         "status": status,
         "assignee_name": assignee_name,
         "assignee_comments": assignee_comments,
@@ -1442,6 +1732,7 @@ def _ensure_frontend_keys(doc: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(doc)
     out.setdefault("sprllNumber", out.get("key", ""))
     out.setdefault("discipline", out.get("customfield_12801", ""))
+    out.setdefault("product", out.get("customfield_21800", ""))
     out.setdefault("missingFields", out.get("missing_fields", []))
     out.setdefault("assigneeCommentSummary", out.get("generated_summary", ""))
     out.setdefault("matchedCommentCount", out.get("comment_count", 0))

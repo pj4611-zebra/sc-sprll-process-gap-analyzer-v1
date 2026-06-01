@@ -50,28 +50,43 @@ def b64_image(path: str) -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_discipline_product_map() -> dict:
-    """Fetch {discipline: [products]} map from backend, cached for 1 hour."""
+def load_discipline_product_map(nonce: int = 0) -> dict:
+    """Fetch {discipline: [products]} map from backend.
+
+    Returns a status dict {"ok": bool, "data": {...}, "error": str}. Successful
+    results are cached for 1 hour; bumping `nonce` busts the cache so the reload
+    button can force a fresh fetch. Failures are NOT cached.
+    """
     try:
         resp = req_lib.get(f"{BACKEND_URL}/api/discipline-products", timeout=120)
         if resp.ok:
-            return resp.json().get("discipline_products", {})
-    except Exception:
-        pass
-    return {}
+            return {"ok": True, "data": resp.json().get("discipline_products", {}), "error": ""}
+        return {"ok": False, "data": {}, "error": f"Backend returned {resp.status_code}: {resp.text[:300]}"}
+    except Exception as e:
+        return {"ok": False, "data": {}, "error": str(e)}
 
 
-def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None, products=None, custom_jql=None):
+def build_payload(mode, sprll_numbers, prompt_option, from_date=None, to_date=None, discipline=None, products=None, custom_jql=None, force_refresh=False):
     if mode == "Enter SPRLL Numbers manually":
-        return {"sprll_numbers": sprll_numbers, "prompt_option": prompt_option}
-    if custom_jql:
-        return {"custom_jql": custom_jql, "prompt_option": prompt_option}
-    return {
-        "from_date": str(from_date),
-        "to_date": str(to_date),
+        return {
+            "sprll_numbers": sprll_numbers,
+            "prompt_option": prompt_option,
+            "force_refresh": force_refresh,
+        }
+    # Search by Date & Discipline: always carry discipline/products so the backend
+    # can persist them on each gap (Database Insights) even when a custom JQL drives
+    # the actual SPRLL resolution.
+    payload = {
+        "from_date": str(from_date) if from_date else None,
+        "to_date": str(to_date) if to_date else None,
         "discipline": discipline,
+        "products": products or [],
         "prompt_option": prompt_option,
+        "force_refresh": force_refresh,
     }
+    if custom_jql:
+        payload["custom_jql"] = custom_jql
+    return payload
 
 
 def generate_missing_fields_excel(issues):
@@ -237,9 +252,20 @@ if mode == "Enter SPRLL Numbers manually":
             unsafe_allow_html=True,
         )
 else:
+    disc_nonce = st.session_state.get("disc_nonce", 0)
     with st.spinner("Loading disciplines & products from Jira…"):
-        disc_prod_map = load_discipline_product_map()
+        disc_result = load_discipline_product_map(disc_nonce)
 
+    if not disc_result.get("ok"):
+        st.error(
+            f"Could not load disciplines & products from Jira: {disc_result.get('error', 'unknown error')}"
+        )
+        if st.button("🔄  Reload disciplines & products"):
+            st.session_state["disc_nonce"] = disc_nonce + 1
+            st.rerun()
+        st.stop()
+
+    disc_prod_map = disc_result.get("data", {})
     available_disciplines = sorted(disc_prod_map.keys()) if disc_prod_map else []
 
     c1, c2, c3 = st.columns(3)
@@ -285,11 +311,19 @@ else:
         jql = st.text_area("Edit the JQL query if needed:", value=default_jql, height=100)
 
 st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
-analyze_clicked = st.button("🚀  Run Analysis", type="primary", use_container_width=False)
+btn_col1, btn_col2, _ = st.columns([1, 1, 3])
+with btn_col1:
+    analyze_clicked = st.button("🚀  Run Analysis", type="primary", use_container_width=True)
+with btn_col2:
+    force_clicked = st.button(
+        "🔁  Force re-run",
+        use_container_width=True,
+        help="Ignore any saved result for this query and regenerate from scratch.",
+    )
 
 
 # ─────────────────────────── analysis output ───────────────────────────
-if analyze_clicked:
+if analyze_clicked or force_clicked:
     payload = build_payload(
         mode=mode,
         sprll_numbers=sprll_numbers,
@@ -299,29 +333,52 @@ if analyze_clicked:
         discipline=discipline,
         products=selected_products,
         custom_jql=jql,
+        force_refresh=force_clicked,
     )
 
     try:
-        with st.spinner("Analyzing with Vertex AI · This may take a moment…"):
+        spinner_msg = (
+            "Generating analysis with Vertex AI · This may take a moment…"
+            if force_clicked
+            else "Analyzing SPRLL issues with Vertex AI · This may take a moment…"
+        )
+        with st.spinner(spinner_msg):
             resp = req_lib.post(f"{BACKEND_URL}/api/analyze", json=payload, timeout=180)
 
         if not resp.ok:
             st.error(f"Backend returned {resp.status_code}: {resp.text[:500]}")
-            st.stop()
+        else:
+            st.session_state["analysis_result"] = resp.json()
+            st.session_state["analysis_meta"] = {
+                "mode": mode,
+                "from_date": str(from_date) if from_date else "",
+                "to_date": str(to_date) if to_date else "",
+                "discipline": discipline or "",
+            }
+    except Exception as e:
+        st.error(f"Analysis failed: {e}")
 
-        result = resp.json()
+
+# ─────────── render output (persisted in session so panels stay interactive) ───────────
+result = st.session_state.get("analysis_result")
+if result:
+    meta = st.session_state.get("analysis_meta", {})
+    try:
         issues = result.get("issues", [])
         process_gaps = result.get("process_gaps", [])
         resolved_sprll_numbers = result.get("sprll_numbers", [])
         st.session_state["last_issues"] = issues
 
+        if result.get("cached"):
+            st.caption("⚡ Served from a saved analysis — use **Force re-run** to regenerate.")
+
         # ───── Scope bar ─────
-        if mode == "Search by Date & Discipline":
+        if meta.get("mode") == "Search by Date & Discipline":
             scope_html = (
                 f'<div class="scope-bar">'
-                f'<span class="scope-item">📅 <strong>{esc(from_date)}</strong> → <strong>{esc(to_date)}</strong></span>'
+                f'<span class="scope-item">📅 <strong>{esc(meta.get("from_date"))}</strong> → <strong>{esc(meta.get("to_date"))}</strong></span>'
                 f'<span class="scope-divider">•</span>'
-                f'<span class="scope-item">🎯 Discipline: <strong>{esc(discipline)}</strong></span>'
+                f'<span class="scope-item">🎯 Discipline: <strong>{esc(meta.get("discipline"))}</strong></span>'
                 f'<span class="scope-divider">•</span>'
                 f'<span class="scope-item"><strong>{len(resolved_sprll_numbers)}</strong> issue(s) in scope</span>'
                 f'</div>'
@@ -359,9 +416,9 @@ if analyze_clicked:
         )
         kpi_html += (
             f'<div class="kpi-card info">'
-            f'<div class="kpi-label">Gaps Identified</div>'
+            f'<div class="kpi-label">Action Items</div>'
             f'<div class="kpi-value">{total_gaps}</div>'
-            f'<div class="kpi-sub">AI-generated release findings</div>'
+            f'<div class="kpi-sub">QA actions for upcoming releases</div>'
             f'</div>'
         )
         kpi_html += (
@@ -382,11 +439,202 @@ if analyze_clicked:
         kpi_html += '</div>'
         st.markdown(kpi_html, unsafe_allow_html=True)
 
-        # ───── Tabs ─────
-        tab_gaps, tab_issues = st.tabs([
-            f"  Release Readiness Findings ({total_gaps})  ",
-            f"  Analyzed Issues ({total_issues})  ",
+        # ───── 3-panel output ─────
+        tab_quick, tab_db, tab_full = st.tabs([
+            "  ⚡ Quick View  ",
+            "  🗄 Database Insights  ",
+            "  📋 Full Details  ",
         ])
+
+        # ───── Panel 1: Quick View ─────
+        with tab_quick:
+            if not process_gaps:
+                st.markdown(
+                    '<div class="empty-state">No action items were generated for this scope.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<div class=\"section-sub\">⚡Action items for upcoming "
+                    "releases, each shown with the LLM judge's improved recommendation.</div>",
+                    unsafe_allow_html=True,
+                )
+                for q_idx, gap in enumerate(process_gaps, 1):
+                    q_num = gap.get("number", q_idx)
+                    q_title = gap.get("title", "Untitled")
+                    q_phase = gap.get("lifecycle_phase") or gap.get("phase", "")
+                    q_val = gap.get("validation") or {}
+                    q_result = q_val.get("validation_result", "")
+                    q_score = q_val.get("validation_score", "")
+                    q_action = q_val.get("improved_recommendation") or gap.get("recommended_fix", "")
+
+                    q_badges = []
+                    if q_phase:
+                        q_badges.append(f'<span class="badge badge-purple">⏱ {esc(q_phase)}</span>')
+                    if q_result:
+                        q_badge_class = {
+                            "Valid": "badge-success",
+                            "Partially Valid": "badge-warning",
+                            "Invalid": "badge-danger",
+                        }.get(q_result, "badge-neutral")
+                        q_score_txt = f" · {esc(q_score)}/5" if q_score != "" else ""
+                        q_badges.append(
+                            f'<span class="badge {q_badge_class}">⚖ {esc(q_result)}{q_score_txt}</span>'
+                        )
+
+                    q_card = ['<div class="gap-card">']
+                    q_card.append('<div class="gap-card-header">')
+                    q_card.append(f'<div class="gap-number">{esc(q_num)}</div>')
+                    q_card.append('<div class="gap-title-wrap">')
+                    if q_badges:
+                        q_card.append(f'<div class="gap-meta">{"".join(q_badges)}</div>')
+                    q_card.append(f'<div class="gap-title">{esc(q_title)}</div>')
+                    q_card.append('</div></div>')
+                    if q_action:
+                        q_card.append(
+                            '<div class="gap-section">'
+                            '<div class="gap-section-label">✅ Recommendation </div>'
+                            f'<div class="gap-section-body">{esc_multiline(q_action)}</div>'
+                            '</div>'
+                        )
+                    q_card.append('</div>')
+                    st.markdown("".join(q_card), unsafe_allow_html=True)
+
+        # ───── Panel 2: Database Insights ─────
+        with tab_db:
+            st.markdown(
+                '<div class="section-sub">🔁 Most-repeated Action items across <strong>all saved '
+                'analyses</strong>. Switch the slice to explore recurring themes.</div>',
+                unsafe_allow_html=True,
+            )
+            try:
+                dim_resp = req_lib.get(f"{BACKEND_URL}/api/gap-dimensions", timeout=60)
+                dims = dim_resp.json() if dim_resp.ok else {}
+            except Exception:
+                dims = {}
+
+            dim_label_to_key = {
+                "By Discipline": "discipline",
+                "By Product": "product",
+                "By Lifecycle Phase": "lifecycle_phase",
+            }
+            dim_label = st.radio(
+                "Slice by",
+                list(dim_label_to_key.keys()),
+                horizontal=True,
+                key="db_dim",
+            )
+            dim_key = dim_label_to_key[dim_label]
+            value_options = {
+                "discipline": dims.get("disciplines", []),
+                "product": dims.get("products", []),
+                "lifecycle_phase": dims.get("lifecycle_phases", []),
+            }[dim_key]
+            selected_value = st.selectbox(
+                "Filter value", ["All"] + value_options, key=f"db_value_{dim_key}"
+            )
+
+            try:
+                with st.spinner("Loading database insights…"):
+                    ins_resp = req_lib.post(
+                        f"{BACKEND_URL}/api/gap-insights",
+                        json={
+                            "dimension": dim_key,
+                            "value": selected_value,
+                            "min_cluster_size": 1,
+                            "top_n": 25,
+                        },
+                        timeout=120,
+                    )
+                if ins_resp.ok:
+                    clusters = ins_resp.json().get("clusters", [])
+                else:
+                    clusters = []
+                    st.error(f"Could not load insights: {ins_resp.status_code} {ins_resp.text[:200]}")
+            except Exception as e:
+                clusters = []
+                st.error(f"Could not load insights: {e}")
+
+            if not clusters:
+                st.markdown(
+                    '<div class="empty-state">No saved action items yet for this slice. '
+                    'Run analyses to populate the database.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="section-sub">🏆 Top {len(clusters)} recurring action item(s)</div>',
+                    unsafe_allow_html=True,
+                )
+                for rank, cl in enumerate(clusters, 1):
+                    rep = cl.get("representative", {})
+                    size = cl.get("size", 1)
+                    r_phase = rep.get("lifecycle_phase", "")
+                    r_score = rep.get("validation_score", "")
+                    r_title = rep.get("title", "Untitled")
+                    r_action = (
+                        rep.get("improved_recommendation")
+                        or rep.get("recommended_fix")
+                        or rep.get("description")
+                        or ""
+                    )
+                    r_disc = ", ".join(cl.get("disciplines", []))
+                    r_prods = ", ".join(cl.get("products", []))
+                    r_sprlls = cl.get("source_sprll_keys", [])
+
+                    d_badges = [f'<span class="badge badge-info">🔁 ×{size}</span>']
+                    if r_phase:
+                        d_badges.append(f'<span class="badge badge-purple">⏱ {esc(r_phase)}</span>')
+                    if r_score not in ("", None):
+                        d_badges.append(f'<span class="badge badge-neutral">⚖ {esc(r_score)}/5</span>')
+
+                    d_card = ['<div class="gap-card">']
+                    d_card.append('<div class="gap-card-header">')
+                    d_card.append(f'<div class="gap-number">{rank}</div>')
+                    d_card.append('<div class="gap-title-wrap">')
+                    d_card.append(f'<div class="gap-meta">{"".join(d_badges)}</div>')
+                    d_card.append(f'<div class="gap-title">{esc(r_title)}</div>')
+                    d_card.append('</div></div>')
+                    if r_action:
+                        d_card.append(
+                            '<div class="gap-section">'
+                            '<div class="gap-section-label">✅ Recommended QA Action</div>'
+                            f'<div class="gap-section-body">{esc_multiline(r_action)}</div>'
+                            '</div>'
+                        )
+                    if r_disc:
+                        d_card.append(
+                            '<div class="gap-section">'
+                            '<div class="gap-section-label">🎯 Disciplines</div>'
+                            f'<div class="gap-section-body">{esc(r_disc)}</div>'
+                            '</div>'
+                        )
+                    if r_prods:
+                        d_card.append(
+                            '<div class="gap-section">'
+                            '<div class="gap-section-label">📦 Products</div>'
+                            f'<div class="gap-section-body">{esc(r_prods)}</div>'
+                            '</div>'
+                        )
+                    if r_sprlls:
+                        d_chips = "".join(
+                            f'<span class="sprll-chip">{esc(k)}</span>' for k in r_sprlls
+                        )
+                        d_card.append(
+                            '<div class="gap-section">'
+                            f'<div class="gap-section-label">🔗 Across SPRLLs ({len(r_sprlls)})</div>'
+                            f'<div class="sprll-chips">{d_chips}</div>'
+                            '</div>'
+                        )
+                    d_card.append('</div>')
+                    st.markdown("".join(d_card), unsafe_allow_html=True)
+
+        # ───── Panel 3: Full Details (sub-tabs) ─────
+        with tab_full:
+            tab_gaps, tab_issues = st.tabs([
+                f"  Findings ({total_gaps})  ",
+                f"  Analyzed Issues ({total_issues})  ",
+            ])
 
         # ───── Gaps tab ─────
         with tab_gaps:
@@ -681,4 +929,4 @@ if analyze_clicked:
                             st.markdown(gen_summary)
 
     except Exception as e:
-        st.error(f"Analysis failed: {e}")
+        st.error(f"Could not render results: {e}")
