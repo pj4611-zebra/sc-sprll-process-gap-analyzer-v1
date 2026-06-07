@@ -16,6 +16,7 @@ from .services import (
     load_cached_analysis,
     save_cached_analysis,
     save_gaps_to_phase_collections,
+    search_issues,
     search_sprll_numbers,
     search_sprll_numbers_by_jql,
     sync_assignee_comments,
@@ -195,13 +196,15 @@ def repeated_gaps(payload: RepeatedGapsRequest):
 
 
 class GapInsightsRequest(BaseModel):
-    dimension: str = Field(default="lifecycle_phase")
+    dimension: str = Field(default="discipline")
     value: Optional[str] = None
+    lifecycle_phase: Optional[str] = None
     from_date: Optional[str] = None
     to_date: Optional[str] = None
     similarity_threshold: Optional[float] = None
     min_cluster_size: int = Field(default=1, ge=1)
     top_n: int = Field(default=25, ge=1, le=200)
+    keyword: Optional[str] = None
 
 
 @app.post("/api/gap-insights")
@@ -221,12 +224,23 @@ def gap_insights(payload: GapInsightsRequest):
             similarity_threshold=payload.similarity_threshold,
             min_cluster_size=payload.min_cluster_size,
             top_n=payload.top_n,
+            lifecycle_phase=payload.lifecycle_phase,
+            keyword=payload.keyword,
         )
+        issues = []
+        if payload.keyword and payload.keyword.strip():
+            issues = search_issues(
+                payload.keyword,
+                discipline=payload.value if payload.dimension == "discipline" else None,
+                product=payload.value if payload.dimension == "product" else None,
+            )
         return {
             "dimension": payload.dimension,
             "value": payload.value,
             "cluster_count": len(clusters),
             "clusters": clusters,
+            "issue_count": len(issues),
+            "issues": issues,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

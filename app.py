@@ -37,6 +37,35 @@ def esc_multiline(value) -> str:
     return esc(value).replace("\n", "<br>")
 
 
+def highlight(escaped_text: str, keyword: str) -> str:
+    """Wrap case-insensitive keyword matches in <mark>. Operates on already-escaped HTML
+    (the keyword is escaped too, so it lines up with the escaped text)."""
+    if not keyword or not keyword.strip() or not escaped_text:
+        return escaped_text
+    esc_kw = esc(keyword.strip())
+    if not esc_kw:
+        return escaped_text
+    return re.compile(re.escape(esc_kw), re.IGNORECASE).sub(
+        lambda m: f'<mark class="kw-highlight">{m.group(0)}</mark>', escaped_text
+    )
+
+
+# Responsible team for each lifecycle phase (shown in the Detailed View findings).
+PHASE_TO_TEAM = {
+    "Coding Phase": "Engineering",
+    "Test Phase": "System Test Team",
+    "Requirement Phase": "Product Manager",
+    "Design Review Phase": "Engineering",
+    "Deployment Phase": "DevOps / Engineering",
+    "Documentation Phase": "Service Readiness",
+}
+
+
+def help_dot(text: str) -> str:
+    """A small, subtle round '?' that reveals `text` as a tooltip on hover."""
+    return f'<span class="help-dot" title="{esc(text)}">?</span>'
+
+
 def load_css():
     css_path = os.path.join(APP_DIR, "static", "styles.css")
     if os.path.exists(css_path):
@@ -164,9 +193,197 @@ def generate_missing_fields_excel(issues):
     return buffer
 
 
+def render_database_insights():
+    """Render the recurring-gaps Database Insights view (slicing + cluster cards).
+
+    Reused on the landing screen (before any analysis is run) and inside a collapsed
+    expander below the result tabs once an analysis exists.
+    """
+    st.markdown(
+        '<div class="section-sub">🔁 Most-repeated Action items across <strong>all saved '
+        'analyses</strong>. Switch the slice to explore recurring themes.</div>',
+        unsafe_allow_html=True,
+    )
+    try:
+        dim_resp = req_lib.get(f"{BACKEND_URL}/api/gap-dimensions", timeout=60)
+        dims = dim_resp.json() if dim_resp.ok else {}
+    except Exception:
+        dims = {}
+
+    dim_label_to_key = {
+        "By Discipline": "discipline",
+        "By Product": "product",
+    }
+    slice_col, value_col, phase_col = st.columns([1.3, 1, 1])
+    with slice_col:
+        dim_label = st.radio(
+            "Slice by",
+            list(dim_label_to_key.keys()),
+            horizontal=True,
+            key="db_dim",
+        )
+    dim_key = dim_label_to_key[dim_label]
+    value_options = {
+        "discipline": dims.get("disciplines", []),
+        "product": dims.get("products", []),
+    }[dim_key]
+    with value_col:
+        selected_value = st.selectbox(
+            "Filter value", ["All"] + value_options, key=f"db_value_{dim_key}"
+        )
+    with phase_col:
+        phase_filter = st.selectbox(
+            "Lifecycle phase",
+            ["All"] + dims.get("lifecycle_phases", []),
+            key="db_phase_filter",
+        )
+
+    keyword = st.text_input(
+        "🔍 Keyword search",
+        placeholder="Find a word anywhere in saved insights & SPRLLs…",
+        key="db_search_keyword",
+    ).strip()
+
+    issues = []
+    try:
+        with st.spinner("Loading database insights…"):
+            ins_resp = req_lib.post(
+                f"{BACKEND_URL}/api/gap-insights",
+                json={
+                    "dimension": dim_key,
+                    "value": selected_value,
+                    "lifecycle_phase": phase_filter,
+                    "min_cluster_size": 1,
+                    "top_n": 25,
+                    "keyword": keyword,
+                },
+                timeout=120,
+            )
+        if ins_resp.ok:
+            payload = ins_resp.json()
+            clusters = payload.get("clusters", [])
+            issues = payload.get("issues", [])
+        else:
+            clusters = []
+            st.error(f"Could not load insights: {ins_resp.status_code} {ins_resp.text[:200]}")
+    except Exception as e:
+        clusters = []
+        st.error(f"Could not load insights: {e}")
+
+    if not clusters and not issues:
+        if keyword:
+            msg = f"No saved insights or SPRLLs match “{esc(keyword)}”."
+        else:
+            msg = ("No saved action items yet for this slice. "
+                   "Run analyses to populate the database.")
+        st.markdown(f'<div class="empty-state">{msg}</div>', unsafe_allow_html=True)
+        return
+
+    if clusters:
+        st.markdown(
+            f'<div class="section-sub">🏆 Top {len(clusters)} recurring action item(s)</div>',
+            unsafe_allow_html=True,
+        )
+    for rank, cl in enumerate(clusters, 1):
+        rep = cl.get("representative", {})
+        r_phase = rep.get("lifecycle_phase", "")
+        r_score = rep.get("validation_score", "")
+        r_title = rep.get("title", "Untitled")
+        r_action = (
+            rep.get("improved_recommendation")
+            or rep.get("recommended_fix")
+            or rep.get("description")
+            or ""
+        )
+        r_disc = ", ".join(cl.get("disciplines", []))
+        r_prods = ", ".join(cl.get("products", []))
+        r_sprlls = cl.get("source_sprll_keys", [])
+
+        d_badges = []
+        if r_phase:
+            d_badges.append(f'<span class="badge badge-purple">⏱ {esc(r_phase)}</span>')
+        if r_score not in ("", None):
+            d_badges.append(f'<span class="badge badge-neutral">⚖ {esc(r_score)}/5</span>')
+
+        d_card = ['<div class="gap-card">']
+        d_card.append('<div class="gap-card-header">')
+        d_card.append(f'<div class="gap-number">{rank}</div>')
+        d_card.append('<div class="gap-title-wrap">')
+        if d_badges:
+            d_card.append(f'<div class="gap-meta">{"".join(d_badges)}</div>')
+        d_card.append(f'<div class="gap-title">{highlight(esc(r_title), keyword)}</div>')
+        d_card.append('</div></div>')
+        if r_action:
+            d_card.append(
+                '<div class="gap-section">'
+                '<div class="gap-section-label">✅ Recommended QA Action</div>'
+                f'<div class="gap-section-body">{highlight(esc_multiline(r_action), keyword)}</div>'
+                '</div>'
+            )
+        if r_disc:
+            d_card.append(
+                '<div class="gap-section">'
+                '<div class="gap-section-label">🎯 Disciplines</div>'
+                f'<div class="gap-section-body">{highlight(esc(r_disc), keyword)}</div>'
+                '</div>'
+            )
+        if r_prods:
+            d_card.append(
+                '<div class="gap-section">'
+                '<div class="gap-section-label">📦 Products</div>'
+                f'<div class="gap-section-body">{highlight(esc(r_prods), keyword)}</div>'
+                '</div>'
+            )
+        if r_sprlls:
+            d_chips = "".join(
+                f'<span class="sprll-chip">{esc(k)}</span>' for k in r_sprlls
+            )
+            d_card.append(
+                '<div class="gap-section">'
+                f'<div class="gap-section-label">🔗 Across SPRLLs ({len(r_sprlls)})</div>'
+                f'<div class="sprll-chips">{d_chips}</div>'
+                '</div>'
+            )
+        d_card.append('</div>')
+        st.markdown("".join(d_card), unsafe_allow_html=True)
+
+    if keyword and issues:
+        st.markdown(
+            f'<div class="section-sub">🔎 {len(issues)} matching SPRLL(s)</div>',
+            unsafe_allow_html=True,
+        )
+        for iss in issues:
+            i_key = iss.get("key", "")
+            i_status = iss.get("status", "")
+            i_summary = iss.get("summary", "")
+            i_desc = (iss.get("description") or "")[:400]
+
+            i_meta = [f'<span class="sprll-chip">{esc(i_key)}</span>']
+            if i_status:
+                i_meta.append(f'<span class="badge badge-neutral">{esc(i_status)}</span>')
+
+            i_card = ['<div class="gap-card">']
+            i_card.append('<div class="gap-card-header">')
+            i_card.append('<div class="gap-title-wrap">')
+            i_card.append(f'<div class="gap-meta">{"".join(i_meta)}</div>')
+            i_card.append(
+                f'<div class="gap-title">{highlight(esc(i_summary), keyword)}</div>'
+            )
+            i_card.append('</div></div>')
+            if i_desc:
+                i_card.append(
+                    '<div class="gap-section">'
+                    '<div class="gap-section-label">📝 Description</div>'
+                    f'<div class="gap-section-body">{highlight(esc_multiline(i_desc), keyword)}</div>'
+                    '</div>'
+                )
+            i_card.append('</div>')
+            st.markdown("".join(i_card), unsafe_allow_html=True)
+
+
 # ─────────────────────────── page setup ───────────────────────────
 st.set_page_config(
-    page_title="SPRLL Release Readiness Analyzer",
+    page_title="SPRLL Process Gap Analyzer",
     page_icon="🚀",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -194,8 +411,8 @@ st.markdown(
     <div class="hero-header">
       <div class="hero-content">
         <div>
-          <div class="hero-badge"><span class="dot"></span> Quality Engineering · Release Intelligence</div>
-          <h1 class="hero-title">SPRLL Release Readiness Analyzer</h1>
+          <div class="hero-badge"><span class="dot"></span> Platform for Proactive Quality Assurance</div>
+          <h1 class="hero-title">SPRLL Process Gap Analyzer</h1>
           <div class="hero-subtitle">
             AI-powered analysis of release-blocking signals across SPRLL issues —
             uncovering systemic gaps, validating findings, and driving smarter releases.
@@ -207,6 +424,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# ─────────────── database insights (collapsible, above parameters) ───────────────
+with st.expander("🗂️ Database Insights", expanded=False):
+    render_database_insights()
 
 
 # ─────────────────────────── analysis parameters ───────────────────────────
@@ -311,14 +533,15 @@ else:
         jql = st.text_area("Edit the JQL query if needed:", value=default_jql, height=100)
 
 st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
-btn_col1, btn_col2, _ = st.columns([1, 1, 3])
+btn_col1, btn_col2, help_col, _ = st.columns([1, 1, 0.4, 2.6])
 with btn_col1:
     analyze_clicked = st.button("🚀  Run Analysis", type="primary", use_container_width=True)
 with btn_col2:
-    force_clicked = st.button(
-        "🔁  Force re-run",
-        use_container_width=True,
-        help="Ignore any saved result for this query and regenerate from scratch.",
+    force_clicked = st.button("🔁 Re-Fetch", use_container_width=True)
+with help_col:
+    st.markdown(
+        f'<div class="help-inline-btn">{help_dot("Re-Fetch ignores any saved result for this query and regenerates the analysis from scratch with the AI model — use it when the SPRLL data changed or you want a fresh run instead of the cached result.")}</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -370,7 +593,7 @@ if result:
         st.session_state["last_issues"] = issues
 
         if result.get("cached"):
-            st.caption("⚡ Served from a saved analysis — use **Force re-run** to regenerate.")
+            st.caption("⚡ Served from a saved analysis — use **Re-Fetch** to regenerate.")
 
         # ───── Scope bar ─────
         if meta.get("mode") == "Search by Date & Discipline":
@@ -439,11 +662,10 @@ if result:
         kpi_html += '</div>'
         st.markdown(kpi_html, unsafe_allow_html=True)
 
-        # ───── 3-panel output ─────
-        tab_quick, tab_db, tab_full = st.tabs([
+        # ───── 2-panel output ─────
+        tab_quick, tab_full = st.tabs([
             "  ⚡ Quick View  ",
-            "  🗄 Database Insights  ",
-            "  📋 Full Details  ",
+            "  📋 Detailed View  ",
         ])
 
         # ───── Panel 1: Quick View ─────
@@ -500,137 +722,17 @@ if result:
                     q_card.append('</div>')
                     st.markdown("".join(q_card), unsafe_allow_html=True)
 
-        # ───── Panel 2: Database Insights ─────
-        with tab_db:
+        # ───── Panel 2: Detailed View (sub-tabs) ─────
+        with tab_full:
             st.markdown(
-                '<div class="section-sub">🔁 Most-repeated Action items across <strong>all saved '
-                'analyses</strong>. Switch the slice to explore recurring themes.</div>',
+                '<div class="dv-help">' + help_dot(
+                    "Findings are process gaps synthesized from the combined SPRLL evidence, "
+                    "each scored 0–5 by an LLM judge (the ⚖ badge) and tagged with the "
+                    "responsible team. Analyzed Issues lists every SPRLL in this run with its "
+                    "field-compliance status and comments, plus the missing-fields Excel report."
+                ) + '</div>',
                 unsafe_allow_html=True,
             )
-            try:
-                dim_resp = req_lib.get(f"{BACKEND_URL}/api/gap-dimensions", timeout=60)
-                dims = dim_resp.json() if dim_resp.ok else {}
-            except Exception:
-                dims = {}
-
-            dim_label_to_key = {
-                "By Discipline": "discipline",
-                "By Product": "product",
-                "By Lifecycle Phase": "lifecycle_phase",
-            }
-            dim_label = st.radio(
-                "Slice by",
-                list(dim_label_to_key.keys()),
-                horizontal=True,
-                key="db_dim",
-            )
-            dim_key = dim_label_to_key[dim_label]
-            value_options = {
-                "discipline": dims.get("disciplines", []),
-                "product": dims.get("products", []),
-                "lifecycle_phase": dims.get("lifecycle_phases", []),
-            }[dim_key]
-            selected_value = st.selectbox(
-                "Filter value", ["All"] + value_options, key=f"db_value_{dim_key}"
-            )
-
-            try:
-                with st.spinner("Loading database insights…"):
-                    ins_resp = req_lib.post(
-                        f"{BACKEND_URL}/api/gap-insights",
-                        json={
-                            "dimension": dim_key,
-                            "value": selected_value,
-                            "min_cluster_size": 1,
-                            "top_n": 25,
-                        },
-                        timeout=120,
-                    )
-                if ins_resp.ok:
-                    clusters = ins_resp.json().get("clusters", [])
-                else:
-                    clusters = []
-                    st.error(f"Could not load insights: {ins_resp.status_code} {ins_resp.text[:200]}")
-            except Exception as e:
-                clusters = []
-                st.error(f"Could not load insights: {e}")
-
-            if not clusters:
-                st.markdown(
-                    '<div class="empty-state">No saved action items yet for this slice. '
-                    'Run analyses to populate the database.</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div class="section-sub">🏆 Top {len(clusters)} recurring action item(s)</div>',
-                    unsafe_allow_html=True,
-                )
-                for rank, cl in enumerate(clusters, 1):
-                    rep = cl.get("representative", {})
-                    size = cl.get("size", 1)
-                    r_phase = rep.get("lifecycle_phase", "")
-                    r_score = rep.get("validation_score", "")
-                    r_title = rep.get("title", "Untitled")
-                    r_action = (
-                        rep.get("improved_recommendation")
-                        or rep.get("recommended_fix")
-                        or rep.get("description")
-                        or ""
-                    )
-                    r_disc = ", ".join(cl.get("disciplines", []))
-                    r_prods = ", ".join(cl.get("products", []))
-                    r_sprlls = cl.get("source_sprll_keys", [])
-
-                    d_badges = [f'<span class="badge badge-info">🔁 ×{size}</span>']
-                    if r_phase:
-                        d_badges.append(f'<span class="badge badge-purple">⏱ {esc(r_phase)}</span>')
-                    if r_score not in ("", None):
-                        d_badges.append(f'<span class="badge badge-neutral">⚖ {esc(r_score)}/5</span>')
-
-                    d_card = ['<div class="gap-card">']
-                    d_card.append('<div class="gap-card-header">')
-                    d_card.append(f'<div class="gap-number">{rank}</div>')
-                    d_card.append('<div class="gap-title-wrap">')
-                    d_card.append(f'<div class="gap-meta">{"".join(d_badges)}</div>')
-                    d_card.append(f'<div class="gap-title">{esc(r_title)}</div>')
-                    d_card.append('</div></div>')
-                    if r_action:
-                        d_card.append(
-                            '<div class="gap-section">'
-                            '<div class="gap-section-label">✅ Recommended QA Action</div>'
-                            f'<div class="gap-section-body">{esc_multiline(r_action)}</div>'
-                            '</div>'
-                        )
-                    if r_disc:
-                        d_card.append(
-                            '<div class="gap-section">'
-                            '<div class="gap-section-label">🎯 Disciplines</div>'
-                            f'<div class="gap-section-body">{esc(r_disc)}</div>'
-                            '</div>'
-                        )
-                    if r_prods:
-                        d_card.append(
-                            '<div class="gap-section">'
-                            '<div class="gap-section-label">📦 Products</div>'
-                            f'<div class="gap-section-body">{esc(r_prods)}</div>'
-                            '</div>'
-                        )
-                    if r_sprlls:
-                        d_chips = "".join(
-                            f'<span class="sprll-chip">{esc(k)}</span>' for k in r_sprlls
-                        )
-                        d_card.append(
-                            '<div class="gap-section">'
-                            f'<div class="gap-section-label">🔗 Across SPRLLs ({len(r_sprlls)})</div>'
-                            f'<div class="sprll-chips">{d_chips}</div>'
-                            '</div>'
-                        )
-                    d_card.append('</div>')
-                    st.markdown("".join(d_card), unsafe_allow_html=True)
-
-        # ───── Panel 3: Full Details (sub-tabs) ─────
-        with tab_full:
             tab_gaps, tab_issues = st.tabs([
                 f"  Findings ({total_gaps})  ",
                 f"  Analyzed Issues ({total_issues})  ",
@@ -665,6 +767,11 @@ if result:
                         meta_badges.append(
                             f'<span class="badge badge-purple">⏱ {esc(lifecycle_phase)}</span>'
                         )
+                        team = PHASE_TO_TEAM.get(lifecycle_phase)
+                        if team:
+                            meta_badges.append(
+                                f'<span class="badge badge-team">👥 {esc(team)}</span>'
+                            )
                     v_result = validation.get("validation_result", "")
                     v_score = validation.get("validation_score", "")
                     if v_result:
@@ -779,7 +886,7 @@ if result:
             if Workbook is not None:
                 excel_buffer = generate_missing_fields_excel(issues)
                 if excel_buffer:
-                    col_dl, _ = st.columns([1, 3])
+                    col_dl, col_dl_help, _ = st.columns([1, 0.4, 2.6])
                     with col_dl:
                         st.download_button(
                             label="📥  Download Missing Fields Report",
@@ -787,6 +894,11 @@ if result:
                             file_name="sprll_missing_fields_report.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True,
+                        )
+                    with col_dl_help:
+                        st.markdown(
+                            f'<div class="help-inline-btn">{help_dot("Exports every analyzed SPRLL and the required fields it is missing to an Excel workbook, so gaps can be tracked and assigned offline.")}</div>',
+                            unsafe_allow_html=True,
                         )
             else:
                 st.warning("Install `openpyxl` to enable Excel download: `pip install openpyxl`")

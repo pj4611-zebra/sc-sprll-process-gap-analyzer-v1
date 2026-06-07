@@ -306,6 +306,7 @@ header[data-testid="stHeader"],
 .badge-info { background: var(--color-info-bg); color: #075985; border-color: #bae6fd; }
 .badge-neutral { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
 .badge-purple { background: #f5f3ff; color: #5b21b6; border-color: #ddd6fe; }
+.badge-team { background: #ecfeff; color: #0e7490; border-color: #a5f3fc; }
 
 /* === FIELD GRID (inside issue expanders) === */
 .field-grid {
@@ -422,6 +423,13 @@ header[data-testid="stHeader"],
     line-height: 1.55;
 }
 .gap-section-body.italic { font-style: italic; color: #475569; }
+mark.kw-highlight {
+    background: #fef08a;
+    color: #92400e;
+    padding: 0 0.15em;
+    border-radius: 3px;
+    font-weight: 600;
+}
 .sprll-chips {
     display: flex;
     flex-wrap: wrap;
@@ -482,6 +490,38 @@ header[data-testid="stHeader"],
     border-color: transparent !important;
     transform: translateY(-1px) !important;
     box-shadow: 0 8px 18px -4px rgba(99,102,241,0.45) !important;
+}
+
+/* Subtle round "?" help marker — native tooltip on hover, intentionally low-key */
+.help-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #eef1f6;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+    vertical-align: middle;
+    border: 1px solid #d8dee9;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.help-dot:hover {
+    background: #e2e8f0;
+    color: #334155;
+}
+/* vertically center a help dot beside a button/download inside a column */
+.help-inline-btn {
+    display: flex;
+    align-items: center;
+    min-height: 38px;
+}
+.dv-help {
+    margin-bottom: 0.4rem;
 }
 
 /* Inputs */

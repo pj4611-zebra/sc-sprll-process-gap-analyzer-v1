@@ -199,7 +199,7 @@ def _get_genai_client() -> genai.Client:
 
 # --- OPTION 1: Process Gap prompts ---
 PROCESS_GAP_PROMPT_1 = """
-You are a Senior Quality Assurance Engineer with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
+You are a Senior Quality Engineering Process Analyst with deep expertise in defect prevention, release governance, root-cause analysis, SDLC escape analysis, and continuous improvement.
 
 You will receive combined descriptions from multiple SPRLL records (Lessons Learned from Customer Defects). These records are the ONLY source of truth.
 
@@ -214,8 +214,10 @@ These fields indicate:
 
 Your mission:
 1. Analyze all SPRLL records together.
-2. Produce the 5 most critical, forward-looking ACTION ITEMS that a QA Engineer should drive BEFORE the upcoming releases so that these past escapes do not recur. Each action item must close a specific missing, weak, skipped, or unenforced control that previously allowed an issue to reach the customer.
-3. Classify each action item into exactly ONE lifecycle phase (the phase where the QA team should act).
+2. Produce the 5 most critical, forward-looking ACTION ITEMS that the responsible owner of the identified lifecycle phase should drive BEFORE upcoming releases so that these past escapes do not recur.
+3. Classify each action item into exactly ONE lifecycle phase.
+4. Assign ownership of each action item to the responsible stakeholder for that lifecycle phase.
+5. Keep recommendations concise, specific, practical, actionable, understandable, and executive-friendly. Each recommendation should be limited to a single sentence and should not contain unnecessary information.
 
 Allowed Lifecycle Phases:
 - Coding Phase
@@ -225,11 +227,30 @@ Allowed Lifecycle Phases:
 - Deployment Phase
 - Documentation Phase
 
+Lifecycle Phase Ownership:
+- Coding Phase → Engineering Team
+- Test Phase → System Test Team
+- Requirement Phase → Product Manager
+- Design Review Phase → Engineering Team
+- Deployment Phase → DevOps Team / Engineering Team
+- Documentation Phase → Service Readiness Team
+
 Definition of an Action Item:
-An action item is a specific, forward-looking QA action that closes a missing, weak, skipped, undefined, ineffective, or unenforced control in the software delivery lifecycle — a control that, if put in place before the upcoming releases, would have prevented the past issue or detected it before customer impact.
+An action item is a specific, forward-looking preventive action that must be implemented by the owner of the identified lifecycle phase to close a missing, weak, skipped, undefined, ineffective, or unenforced control that previously allowed an issue to reach the customer.
+
+The action item must clearly identify:
+- what control must be implemented or strengthened
+- where in the process it must be applied
+- who is responsible for implementing it
+- how it will reduce the likelihood of recurrence
 
 Lifecycle Phase Classification Objective:
-Determine the EARLIEST reasonable lifecycle phase where the QA team should act so the issue is prevented or detected before reaching the customer in upcoming releases.
+Determine the EARLIEST reasonable lifecycle phase where the issue should ideally have been prevented or detected before reaching the customer.
+
+Once the lifecycle phase is determined:
+- Assign the responsible owner.
+- Generate recommendations from the perspective of that owner.
+- Ensure the recommendation aligns with the responsibilities of that owner.
 
 MANDATORY PHASE MAPPING RULES:
 The following mappings ALWAYS override general lifecycle inference rules whenever applicable:
@@ -308,16 +329,42 @@ Documentation Phase:
 - Incorrect documentation guidance
 - User enablement failures
 
+OWNER-SPECIFIC RECOMMENDATION RULES:
+
+Coding Phase:
+Write recommendations for the Engineering Team.
+Focus on code reviews, coding standards, static analysis, peer reviews, implementation controls, validation checks, and secure coding practices.
+
+Test Phase:
+Write recommendations for the System Test Team.
+Focus on regression coverage, test execution, automation, validation scenarios, edge-case testing, environment validation, and test governance.
+
+Requirement Phase:
+Write recommendations for the Product Manager.
+Focus on requirement clarity, business rules, acceptance criteria, requirement reviews, signoffs, feature parity validation, and scope definition.
+
+Design Review Phase:
+Write recommendations for the Engineering Team.
+Focus on architecture reviews, dependency validation, interface reviews, workflow validation, scalability assessment, and design governance.
+
+Deployment Phase:
+Write recommendations for the DevOps Team / Engineering Team.
+Focus on deployment validation, release governance, environment consistency, rollout verification, deployment checklists, and third-party dependency controls.
+
+Documentation Phase:
+Write recommendations for the Service Readiness Team.
+Focus on documentation reviews, installation guides, configuration instructions, training material validation, release documentation, and user enablement.
+
 MANDATORY RULES:
 1. Use only facts explicitly present in the input.
 2. Do NOT assume missing details or use external knowledge.
-3. Every gap MUST be supported by clear evidence from the input.
+3. Every action item MUST be supported by clear evidence from the input.
 4. Do NOT produce vague statements such as:
    - Improve testing
    - Improve communication
    - Follow best practices
    - Increase ownership
-5. Each gap must point to an exact broken or missing control such as:
+5. Each action item must point to an exact broken or missing control such as:
    - lifecycle step
    - approval gate
    - checklist item
@@ -328,18 +375,19 @@ MANDATORY RULES:
    - handoff process
    - release criterion
    - training control
-6. Each gap must be unique, non-overlapping, and not a reworded duplicate.
-7. Before finalizing, merge semantically overlapping gaps into a single stronger gap.
+6. Each action item must be unique, non-overlapping, and not a reworded duplicate.
+7. Before finalizing, merge semantically overlapping action items into a single stronger action item.
 8. Do not weaken precision merely to maximize thematic diversity.
-9. Prefer systemic gaps that explain multiple issues over isolated one-off observations.
-10. Prioritize gaps with the highest business value if fixed.
+9. Prefer systemic actions that address multiple issues over isolated observations.
+10. Prioritize actions with the highest business value if implemented.
 11. Be concise, specific, practical, and executive-friendly.
 12. If evidence is weak, choose the best-supported interpretation only. Never fabricate.
-13. Every identified process gap MUST be classified into exactly ONE lifecycle phase.
+13. Every action item MUST be classified into exactly ONE lifecycle phase.
 14. If multiple phases seem possible, choose the EARLIEST preventable phase unless overridden by mandatory phase mappings.
 15. Use LL Type-Primary and LL Type-Secondary as primary classification signals whenever available.
 16. If LL fields are missing or unclear, infer the lifecycle phase using SPRLL evidence and best-supported engineering judgment only.
 17. Confidence must reflect the strength, clarity, and directness of supporting evidence.
+18. Recommendations must be written for the assigned owner and be directly implementable by that owner before upcoming releases.
 
 DECISION PRIORITY ORDER:
 1. Mandatory phase mapping rules
@@ -348,31 +396,13 @@ DECISION PRIORITY ORDER:
 4. SPRLL textual evidence
 5. Best-supported engineering judgment
 
-IMPACT PRIORITIZATION (use for ranking):
-Sort highest to lowest using these factors:
+IMPACT PRIORITIZATION:
+Sort highest to lowest using:
 - Severity of customer/business impact
 - Likelihood of recurrence
 - Failure to detect earlier in lifecycle
 - Breadth across modules, teams, releases, or customers
 - Ease and value of preventive implementation
-
-ANALYSIS LENSES (use internally only, do not output):
-- Requirements completeness and ambiguity
-- Design review effectiveness
-- Unit / integration / regression coverage
-- Negative and edge-case testing
-- Environment and configuration parity
-- Data validation and error handling
-- Monitoring, logging, and alerting
-- Release readiness review rigor
-- Change management controls
-- Deployment validation
-- Ownership and handoff clarity
-- SOP / checklist compliance
-- Risk assessment quality
-- Documentation quality
-- Training readiness
-- Dependency and interface validation
 
 OUTPUT INSTRUCTIONS:
 Return ONLY valid JSON.
@@ -381,7 +411,7 @@ No explanations.
 No comments.
 No extra text.
 
-Return exactly 5 objects in a JSON array, sorted by highest impact first.
+Return exactly 5 objects in a JSON array sorted by highest impact first.
 
 JSON Schema:
 [
@@ -389,10 +419,11 @@ JSON Schema:
     "number": 1,
     "title": "Short specific action-item title (max 10 words)",
     "lifecycle_phase": "Coding Phase | Test Phase | Requirement Phase | Design Review Phase | Deployment Phase | Documentation Phase",
-    "process_area": "Exact lifecycle stage, gate, checklist, review, artifact, or control the QA team must act on",
-    "description": "Precise description of the control that was missing, weak, skipped, or unenforced, why it enabled customer escape, and what exact control the QA team must add or strengthen for the upcoming releases.",
+    "owner": "Engineering Team | System Test Team | Product Manager | DevOps Team / Engineering Team | Service Readiness Team",
+    "process_area": "Exact lifecycle stage, gate, checklist, review, artifact, or control",
+    "description": "Concise description of the missing or weak control and why it enabled customer escape.",
     "evidence": "Short quote or concise paraphrase from the input directly supporting this action item",
-    "recommended_fix": "Concrete action the QA team should take for the upcoming releases, implementable immediately, including where in the process it should be added.",
+    "recommended_fix": "Single-sentence, owner-specific preventive action that can be implemented before upcoming releases.",
     "confidence": "High | Medium | Low",
     "related_sprll": [
       {{
@@ -404,8 +435,8 @@ JSON Schema:
 ]
 
 RELATED SPRLL RULES:
-- "related_sprll" MUST list every SPRLL key from the input whose evidence contributed to this action item.
-- For each entry, "lifecycle_phase" is the lifecycle phase inferred for THAT specific SPRLL record (may differ from the overall action-item lifecycle_phase if multiple phases are represented).
+- related_sprll MUST list every SPRLL key from the input whose evidence contributed to this action item.
+- For each entry, lifecycle_phase is the phase inferred for that specific SPRLL.
 - Use only SPRLL keys explicitly present in the input.
 
 Context:
@@ -544,7 +575,7 @@ JSON Schema:
   "identified_issues": [
     "Specific weakness or concern in the recommendation"
   ],
-  "improved_recommendation": "Refined implementation-ready recommendation if improvement is needed, otherwise repeat the original.",
+  "improved_recommendation": "Refined implementation-ready recommendation if improvement is needed, otherwise repeat the original.Keep it concise, laconic, specific, practical, understandable,and executive-friendly.Don't give unnecessary information if it is not critical.Strictly limit it to one sentence and don't keep it wordy.",
   "confidence": "High | Medium | Low"
 }}
 
@@ -867,6 +898,50 @@ def _get_issue_collection():
     if client is None:
         return None
     return client[s.mongodb_db_name]["issues"]
+
+
+def search_issues(
+    keyword: str,
+    discipline: Optional[str] = None,
+    product: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Case-insensitive keyword search over the raw SPRLL issues collection."""
+    if not keyword or not keyword.strip():
+        return []
+    coll = _get_issue_collection()
+    if coll is None:
+        return []
+    rgx = {"$regex": re.escape(keyword.strip()), "$options": "i"}
+    query: Dict[str, Any] = {
+        "$or": [
+            {"summary": rgx},
+            {"description": rgx},
+            {"generated_summary": rgx},
+            {"assignee_comments": rgx},  # regex matches if any array element matches
+        ]
+    }
+    if discipline and discipline != "All":
+        query["customfield_12801"] = discipline
+    if product and product != "All":
+        query["customfield_21800"] = product
+
+    out: List[Dict[str, Any]] = []
+    try:
+        for d in coll.find(query).limit(limit):
+            out.append(
+                {
+                    "key": d.get("key"),
+                    "summary": d.get("summary"),
+                    "description": d.get("description"),
+                    "status": d.get("status"),
+                    "discipline": d.get("customfield_12801"),
+                    "product": d.get("customfield_21800"),
+                }
+            )
+    except PyMongoError as ex:
+        print(f"[WARN] issue keyword search failed: {ex}")
+    return out
 
 
 def _strip_mongo_id(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -1295,7 +1370,13 @@ def _cluster_gap_docs(
             }
         )
 
-    clusters.sort(key=lambda c: (c["size"], c["representative"].get("validation_score") or 0), reverse=True)
+    clusters.sort(
+        key=lambda c: (
+            len(c.get("source_sprll_keys") or []),
+            c["representative"].get("validation_score") or 0,
+        ),
+        reverse=True,
+    )
     return clusters
 
 
@@ -1307,11 +1388,17 @@ def get_gap_insights(
     similarity_threshold: Optional[float] = None,
     min_cluster_size: int = 1,
     top_n: int = 25,
+    lifecycle_phase: Optional[str] = None,
+    keyword: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return the most-repeated QA action items sliced by discipline / product / lifecycle phase.
 
     dimension: "discipline" | "product" | "lifecycle_phase".
     value: optional specific discipline/product/phase to filter on ("All" or None = no filter).
+    lifecycle_phase: optional phase filter applied on top of a discipline/product slice
+        ("All" or None = no filter). Narrows the scan to that single phase collection.
+    keyword: optional case-insensitive substring; when set, only gaps containing it in any
+        searchable text field are returned (combined with the slice/date filters).
     """
     s = get_settings()
     client = _get_mongo_client()
@@ -1341,9 +1428,26 @@ def get_gap_insights(
     elif dimension == "product" and has_value:
         query["products"] = value
 
+    if keyword and keyword.strip():
+        rgx = {"$regex": re.escape(keyword.strip()), "$options": "i"}
+        query["$or"] = [
+            {"title": rgx},
+            {"description": rgx},
+            {"recommended_fix": rgx},
+            {"evidence": rgx},
+            {"process_area": rgx},
+            {"validation.improved_recommendation": rgx},
+        ]
+
     # Choose which phase collections to scan.
+    has_phase = bool(lifecycle_phase) and lifecycle_phase != "All"
     if dimension == "lifecycle_phase" and has_value:
+        # Legacy: lifecycle phase used as the top-level dimension.
         coll_name = PHASE_TO_COLLECTION.get(value)
+        collection_names = [coll_name] if coll_name else []
+    elif has_phase:
+        # Lifecycle phase used as a filter on top of a discipline/product slice.
+        coll_name = PHASE_TO_COLLECTION.get(lifecycle_phase)
         collection_names = [coll_name] if coll_name else []
     else:
         collection_names = list(PHASE_TO_COLLECTION.values())
