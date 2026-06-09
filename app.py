@@ -316,7 +316,7 @@ def render_database_insights():
         if r_action:
             d_card.append(
                 '<div class="gap-section">'
-                '<div class="gap-section-label">✅ Recommended QA Action</div>'
+                '<div class="gap-section-label">✅ Recommended Action</div>'
                 f'<div class="gap-section-body">{highlight(esc_multiline(r_action), keyword)}</div>'
                 '</div>'
             )
